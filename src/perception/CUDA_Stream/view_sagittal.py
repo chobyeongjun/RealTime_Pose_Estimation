@@ -374,7 +374,7 @@ def main() -> int:
             cur_valid = False
             cur_frame_id = -1
             if data is not None:
-                cur_frame_id, _ts, kpts_3d, kpt_conf, _kpts_2d, box_conf, valid, dir_ = data
+                cur_frame_id, _ts, kpts_3d, kpt_conf, _kpts_2d, box_conf, valid, dir_, world_frame_applied = data
                 # Geometric sanity gate — catches YOLO failure modes (self-occlusion,
                 # L/R swap, treadmill-belt confusion) that produce impossible poses
                 # while still reporting valid=True. Gate is read-only; rejected
@@ -572,6 +572,7 @@ def main() -> int:
                 fps_t0 = now
 
             valid_tag = "VALID" if cur_valid else f"sticky+{sticky_age_frames}"
+            wf_tag = "WF:IMU" if (data is not None and world_frame_applied) else "WF:CAM"
             if args.no_calib:
                 calib_tag = "calib OFF"
             elif calib_failed:
@@ -590,7 +591,7 @@ def main() -> int:
             header = (f"frame {last_frame_id}  conf {last_box_conf:.2f}  "
                       f"depth_inv {last_dir:.0%}  viewer {fps_show:.0f}Hz  "
                       f"{valid_tag}  [{calib_tag}]  mode:{args.display_mode}  "
-                      f"{sanity_tag}")
+                      f"{sanity_tag}  {wf_tag}")
             cv2.putText(img, header, (10, 22), cv2.FONT_HERSHEY_SIMPLEX,
                         0.5, (255, 255, 255), 1, cv2.LINE_AA)
 

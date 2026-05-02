@@ -425,7 +425,7 @@ class ZEDGpuBridge:
             depth_gpu=depth_gpu,
             ts_ns=ts_ns,
             frame_id=self._frame_id,
-            calibration=self._calibration,
+            calibration=dict(self._calibration),  # snapshot copy — not a reference
             ready_event=ready_event,
         )
 

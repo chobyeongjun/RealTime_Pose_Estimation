@@ -389,6 +389,7 @@ def main() -> int:
                     box_conf=tick.result.box_conf,
                     valid=publish_valid,
                     depth_invalid_ratio=tick.result.depth_invalid_ratio,
+                    world_frame_applied=tick.world_frame_applied,
                 )
                 watchdog.note_publish()
     finally:

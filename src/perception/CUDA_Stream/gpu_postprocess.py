@@ -103,6 +103,7 @@ class GpuPostprocessor:
         schema: KeypointSchema = COCO17,
         conf_threshold: float = 0.35,
         kpt_conf_threshold: float = 0.30,
+        ankle_conf_threshold: float = 0.72,  # ankle often occluded — higher bar
         depth_patch: int = 3,           # sample a 3×3 patch and take nanmedian
         occluded_count: Optional[int] = None,  # None = max(2, K//3) — relative to schema
         device: Optional[torch.device] = None,
@@ -113,15 +114,42 @@ class GpuPostprocessor:
         self.K = schema.num_keypoints
         self.conf_threshold = conf_threshold
         self.kpt_conf_threshold = kpt_conf_threshold
+        self.ankle_conf_threshold = ankle_conf_threshold
         self.depth_patch = max(1, int(depth_patch))
+
+        # Determine ankle indices from schema name convention.
+        ankle_set = {i for i, n in enumerate(schema.keypoints) if "ankle" in n.lower()}
+        self._ankle_set = ankle_set
+
+        # Per-joint depth threshold tensor: ankle uses ankle_conf_threshold,
+        # all others use kpt_conf_threshold. Ankles are frequently occluded
+        # behind the treadmill belt or walker frame — a stricter threshold
+        # prevents low-confidence ankle depth from corrupting 3D lift.
+        thresh_list = [
+            ankle_conf_threshold if i in ankle_set else kpt_conf_threshold
+            for i in range(self.K)
+        ]
+        self._kpt_thresh_t = torch.tensor(thresh_list, dtype=torch.float32,
+                                          device=device or torch.device("cuda:0"))
+
+        # Core mask: True for non-ankle joints. Occlusion validity check
+        # uses only core (hip + knee) joints so a hidden ankle doesn't
+        # immediately flip valid=False for a perfectly visible upper leg.
+        self._core_mask_t = torch.tensor(
+            [i not in ankle_set for i in range(self.K)],
+            dtype=torch.bool, device=device or torch.device("cuda:0"),
+        )
+
         # For COCO17 the default of 2 (12%) is strict enough, but for
         # lowlimb6 requiring ≥2 occlusions is 33% of all joints — too
         # harsh for a gait rehab workflow where a single leg occlusion
         # is common. Use max(2, K // 3) so:
         #   K=6  → 2 (same absolute bar, but better calibrated)
         #   K=17 → 5 (~30% — less chatty than 2/17 = 12%)
+        # NOTE: occluded_count is checked against CORE joints only (hips+knees).
+        core_k = self.K - len(ankle_set)
         self.occluded_count = (
-            occluded_count if occluded_count is not None else max(2, self.K // 3)
+            occluded_count if occluded_count is not None else max(2, core_k // 3)
         )
         self.device = device or torch.device("cuda:0")
         self.use_filter = use_filter
@@ -229,8 +257,10 @@ class GpuPostprocessor:
                 kpts_3d[:, :2] = xy_src
                 invalid_ratio_t = torch.tensor(1.0, device=self.device)
 
-            # Occlusion count on GPU
-            num_low_conf_t = (kp_conf < self.kpt_conf_threshold).sum().float()
+            # Occlusion count on GPU — core joints only (hips + knees).
+            # Ankles are frequently occluded and should not flip the validity
+            # flag when the upper-leg chain is cleanly visible.
+            num_low_conf_t = (kp_conf[self._core_mask_t] < self.kpt_conf_threshold).sum().float()
 
             # === Single D2H sync — combine 3 scalars into 1 transfer ===
             scalars = torch.stack([box_conf_t, num_low_conf_t, invalid_ratio_t]).cpu()
@@ -361,7 +391,7 @@ class GpuPostprocessor:
         # invalid ratio stays on GPU — caller stacks + syncs
         invalid_ratio_t = (~valid).float().mean()
 
-        z = torch.where(kp_conf >= self.kpt_conf_threshold, z, torch.zeros_like(z))
+        z = torch.where(kp_conf >= self._kpt_thresh_t, z, torch.zeros_like(z))
 
         fx, fy = calib["fx"], calib["fy"]
         cx, cy = calib["cx"], calib["cy"]

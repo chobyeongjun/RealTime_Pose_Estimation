@@ -40,7 +40,8 @@ class PipelineTick:
     frame_id: int
     ts_ns: int
     result: PoseResult
-    latency_ms: dict  # {"grab": ..., "preproc": ..., "infer": ..., "post": ..., "e2e": ...}
+    latency_ms: dict  # {"e2e", "true_e2e_ms", pre/inf/post stage_ms, ...}
+    world_frame_applied: bool = False  # True when IMU R was applied to kpts_3d_m
 
 
 class StreamedPosePipeline:
@@ -148,11 +149,16 @@ class StreamedPosePipeline:
         po.stream.synchronize()
 
         t_end = time.perf_counter()
+        world_frame_applied = "R_world_from_cam" in frame.calibration
         return PipelineTick(
             frame_id=frame.frame_id,
             ts_ns=frame.ts_ns,
             result=result,
-            latency_ms={"e2e": (t_end - t_start) * 1e3},
+            world_frame_applied=world_frame_applied,
+            latency_ms={
+                "e2e": (t_end - t_start) * 1e3,
+                "true_e2e_ms": (time.time_ns() - frame.ts_ns) / 1e6,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -293,6 +299,7 @@ class StreamedPosePipeline:
         po.stream.synchronize()  # only sync point in the hot path
 
         # --- stage D: optional constraint gate + occlusion fallback
+        world_frame_applied = "R_world_from_cam" in frame.calibration
         final_result = self._apply_constraints_and_fallback(
             result, ts_s=frame.ts_ns * 1e-9
         )
@@ -312,8 +319,10 @@ class StreamedPosePipeline:
             frame_id=frame.frame_id,
             ts_ns=frame.ts_ns,
             result=final_result,
+            world_frame_applied=world_frame_applied,
             latency_ms={
                 "e2e": (t_end - t_start) * 1e3,
+                "true_e2e_ms": (time.time_ns() - frame.ts_ns) / 1e6,
                 **{f"{k}_ms": v for k, v in trace.stage_ms.items()},
             },
         )

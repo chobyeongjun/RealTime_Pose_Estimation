@@ -82,6 +82,12 @@ class DumpReader:
         self.box_conf = data["box_conf"]
         self.valid = data["valid"]
         self.depth_inv_ratio = data["depth_inv_ratio"]
+        # world_frame_applied was added later — old dumps default to False
+        self.world_frame_applied = (
+            data["world_frame_applied"].astype(bool)
+            if "world_frame_applied" in data else
+            np.zeros(self.frame_id.shape[0], dtype=bool)
+        )
         try:
             self.meta = json.loads(str(data["meta"]))
         except Exception:
@@ -117,6 +123,7 @@ class DumpReader:
             float(self.box_conf[i]),
             bool(self.valid[i]),
             float(self.depth_inv_ratio[i]),
+            bool(self.world_frame_applied[i]),
         )
 
     def close(self) -> None:
@@ -170,6 +177,7 @@ def main() -> int:
     box_conf_list = []
     valid_list = []
     depth_inv_list = []
+    world_frame_list = []
 
     last_frame_id = -1
     dup_skipped = 0
@@ -187,7 +195,7 @@ def main() -> int:
             if data is None:
                 time.sleep(0.001)
                 continue
-            frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d, box_conf, valid, depth_inv = data
+            frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d, box_conf, valid, depth_inv, world_frame_applied = data
             if frame_id == last_frame_id:
                 dup_skipped += 1
                 time.sleep(0.001)
@@ -204,6 +212,7 @@ def main() -> int:
             box_conf_list.append(box_conf)
             valid_list.append(valid)
             depth_inv_list.append(depth_inv)
+            world_frame_list.append(world_frame_applied)
             n = len(frame_ids)
             if n % 60 == 0:
                 elapsed = time.monotonic() - t_start
@@ -244,6 +253,7 @@ def main() -> int:
         box_conf=np.asarray(box_conf_list, dtype=np.float32),
         valid=np.asarray(valid_list, dtype=bool),
         depth_inv_ratio=np.asarray(depth_inv_list, dtype=np.float32),
+        world_frame_applied=np.asarray(world_frame_list, dtype=bool),
         meta=np.asarray(json.dumps(meta), dtype=object),
     )
 

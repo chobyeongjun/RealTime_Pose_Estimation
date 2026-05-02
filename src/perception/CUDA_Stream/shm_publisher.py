@@ -10,7 +10,8 @@ Binary layout (little-endian, all fields):
   [24:  28]  float32  box_conf
   [28:  32]  uint32   valid_flag
   [32:  36]  float32  depth_invalid_ratio
-  [36:  64]  padding (aligned to 64B for cache line)
+  [36:  37]  uint8    world_frame_applied  (0=camera frame, 1=world frame via IMU/pitch)
+  [37:  64]  padding (aligned to 64B for cache line)
   [64:  64+K*12]       float32×K×3   kpts_3d_m
   [ . :  . +K*4]       float32×K     kpt_conf
   [ . :  . +K*8]       float32×K×2   kpts_2d_px
@@ -48,6 +49,7 @@ TS_OFF = 16
 BOX_CONF_OFF = 24
 VALID_OFF = 28
 DEPTH_INVALID_OFF = 32
+WORLD_FRAME_OFF = 36   # uint8: 1 = IMU world frame applied, 0 = camera frame
 
 
 DEFAULT_NAME = "hwalker_pose_cuda"
@@ -123,6 +125,7 @@ class ShmPublisher:
         box_conf: float,
         valid: bool,
         depth_invalid_ratio: float = 0.0,
+        world_frame_applied: bool = False,
     ) -> None:
         K = self.K
         if kpts_3d_m.shape != (K, 3) or kpts_3d_m.dtype != np.float32:
@@ -142,6 +145,7 @@ class ShmPublisher:
         struct.pack_into("<f", buf, BOX_CONF_OFF, float(box_conf))
         struct.pack_into("<I", buf, VALID_OFF, 1 if valid else 0)
         struct.pack_into("<f", buf, DEPTH_INVALID_OFF, float(depth_invalid_ratio))
+        struct.pack_into("<B", buf, WORLD_FRAME_OFF, 1 if world_frame_applied else 0)
 
         buf[self.kpts_3d_off : self.kpts_3d_off + self.kpts_3d_bytes] = kpts_3d_m.tobytes()
         buf[self.kpt_conf_off : self.kpt_conf_off + self.kpt_conf_bytes] = kpt_conf.tobytes()
@@ -212,10 +216,11 @@ class ShmReader:
             kpts_2d = np.frombuffer(
                 buf, dtype=np.float32, count=K * 2, offset=self.kpts_2d_off
             ).reshape(K, 2).copy()
+            world_frame_applied = struct.unpack_from("<B", buf, WORLD_FRAME_OFF)[0] != 0
             seq1 = struct.unpack_from("<I", buf, SEQ_OFF)[0]
             if seq0 == seq1 and (seq0 & 1) == 0:
                 return (frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d,
-                        box_conf, valid, depth_inv)
+                        box_conf, valid, depth_inv, world_frame_applied)
         return None
 
     def close(self) -> None:
