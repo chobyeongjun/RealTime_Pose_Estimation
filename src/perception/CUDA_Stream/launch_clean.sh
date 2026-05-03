@@ -40,6 +40,18 @@ echo "[1/5] 이전 publisher/viewer 정리..."
 pkill -9 -f run_stream_demo 2>/dev/null || true
 pkill -9 -f view_sagittal   2>/dev/null || true
 sleep 1
+# Verify old processes are actually dead (root can kill any user's process;
+# if still alive after SIGKILL, something is stuck in D-state — wait longer).
+for i in 1 2 3; do
+    ALIVE=$(pgrep -f run_stream_demo 2>/dev/null | grep -v "^$$" || true)
+    if [ -z "$ALIVE" ]; then break; fi
+    echo "  [wait $i] pids still alive: $ALIVE — waiting 2s..."
+    sleep 2
+done
+ALIVE=$(pgrep -f run_stream_demo 2>/dev/null | grep -v "^$$" || true)
+if [ -n "$ALIVE" ]; then
+    echo "  WARNING: could not kill pids $ALIVE (D-state?). GPU contention possible."
+fi
 
 echo "[2/5] Stale SHM / Argus IPC 파일 제거..."
 rm -f /dev/shm/hwalker_pose_cuda 2>/dev/null || true

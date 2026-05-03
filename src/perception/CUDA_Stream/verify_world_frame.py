@@ -72,11 +72,27 @@ def run(n_frames: int = 150) -> bool:
         valid_count += 1
 
         # collect Y (height) and Z (depth) for hip/knee/ankle
+        # z > 0 guard: ankle_conf_threshold=0.72 zeroes depth when conf is
+        # low (0.30–0.72), giving xyz=[0,0,0] which is NOT the ankle position.
+        # Including such zero-depth coordinates would make ankle_Y=0 (camera
+        # origin), which is ABOVE the knee → false gravity_alignment failure.
         def y(name):
-            return float(kpts_3d[IDX[name], 1]) if kpt_conf[IDX[name]] > 0.30 else None
+            idx = IDX[name]
+            if kpt_conf[idx] <= 0.30:
+                return None
+            z_val = float(kpts_3d[idx, 2])
+            if z_val <= 0.0:   # zero-depth = invalid (ankle zeroed by pipeline)
+                return None
+            return float(kpts_3d[idx, 1])
 
         def z(name):
-            return float(kpts_3d[IDX[name], 2]) if kpt_conf[IDX[name]] > 0.30 else None
+            idx = IDX[name]
+            if kpt_conf[idx] <= 0.30:
+                return None
+            z_val = float(kpts_3d[idx, 2])
+            if z_val <= 0.0:
+                return None
+            return z_val
 
         lh_y = y("left_hip");  rh_y = y("right_hip")
         lk_y = y("left_knee"); rk_y = y("right_knee")
