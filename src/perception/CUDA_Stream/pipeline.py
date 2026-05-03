@@ -275,8 +275,13 @@ class StreamedPosePipeline:
 
         self.tracer.mark_start("inf", inf.stream)
         if self._inf_graph is not None and self._inf_graph.captured:
-            # Single launch — replaces hundreds of cudaLaunchKernel calls.
-            self._inf_graph.replay()
+            # PyTorch 2.x CUDAGraph.replay() uses getCurrentCUDAStream(),
+            # NOT the internally stored capture stream. Without this context
+            # manager the graph launches on stream 0 — both timing events
+            # and inf.record_done() fire with no real work between them,
+            # giving inf=0ms and corrupting the post-stage dependency.
+            with torch.cuda.stream(inf.stream):
+                self._inf_graph.replay()
         else:
             with torch.cuda.stream(inf.stream):
                 self.runner.infer_async(self.sm.stream_ptr("infer"))
