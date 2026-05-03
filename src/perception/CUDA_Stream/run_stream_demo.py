@@ -33,7 +33,7 @@ import torch
 # LATENCY_HARD_LIMIT_MS is the absolute ceiling — data past this is
 # considered stale for control purposes and must NOT reach Teensy as-is.
 # 20 ms user-defined. 18 ms soft warning (below) triggers [SLOW] log.
-LATENCY_HARD_LIMIT_MS = float("inf")  # hard limit disabled — log only
+LATENCY_HARD_LIMIT_MS = 20.0   # true_e2e_ms (camera→GPU done) ceiling
 LATENCY_SOFT_WARN_MS  = 18.0
 
 from .constraints import (
@@ -102,21 +102,6 @@ def parse_args() -> argparse.Namespace:
         "--camera-pitch-deg", type=float, default=None,
         help="manual forward pitch override (e.g. 32 for camera mounted "
              "leaning 32° down). Overrides IMU warmup — most reliable path.",
-    )
-    ap.add_argument(
-        "--max-capture-fps", type=int, default=None,
-        help="throttle ZED grab rate (default: unlimited = camera fps). "
-             "Set to ~90 on Orin NX to reduce ZED PERFORMANCE depth SM "
-             "contention with TRT inference. ZED still captures at hardware "
-             "fps; we just call grab() less often, reducing wasted depth "
-             "computes (~33%% fewer at 90fps vs 120fps).",
-    )
-    ap.add_argument(
-        "--depth-decimation", type=int, default=1,
-        help="retrieve ZED depth every N frames (default 1 = every frame). "
-             "2 = depth at ~60fps on SVGA@120fps, halving ZED PERFORMANCE "
-             "GPU work and SM contention with TRT. Intermediate frames reuse "
-             "the last depth map (safe at 120fps — depth changes < 1cm/frame).",
     )
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
@@ -260,8 +245,6 @@ def main() -> int:
         enable_depth=args.depth_mode != "NONE",
         world_frame=not args.no_world_frame,
         manual_pitch_deg=args.camera_pitch_deg,
-        max_capture_fps=args.max_capture_fps,
-        depth_decimation=args.depth_decimation,
     )
     bridge.open()
     bridge.start()
@@ -398,8 +381,10 @@ def main() -> int:
             # skips ILC/impedance update. Next frame ships normally.
             # During warmup we also mark as valid=False (to be safe) but
             # don't count it toward stats.
-            frame_exceeds_budget = e2e_ms > LATENCY_HARD_LIMIT_MS
-            frame_warn = e2e_ms > LATENCY_SOFT_WARN_MS
+            # HARD LIMIT uses true_e2e_ms (camera timestamp → GPU done).
+            # e2e_ms is GPU-pipeline-only and excludes capture/buffer-wait.
+            frame_exceeds_budget = true_e2e_ms > LATENCY_HARD_LIMIT_MS
+            frame_warn = true_e2e_ms > LATENCY_SOFT_WARN_MS
 
             # During warmup, log at debug level only (still mark valid=False
             # in publish so downstream ignores). Post-warmup spikes are

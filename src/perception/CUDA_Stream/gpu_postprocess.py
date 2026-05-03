@@ -222,13 +222,7 @@ class GpuPostprocessor:
             )
 
         K = self.K
-        # Use set_stream (not torch.cuda.stream() context manager) to avoid
-        # the implicit wait_stream(stream_0) / stream_0.wait_stream(po.stream)
-        # that the context manager injects on every call. ZED SDK work on
-        # stream_0 would otherwise serialize with post-processing.
-        _prev_post_stream = torch.cuda.current_stream(self.device)
-        torch.cuda.set_stream(stream)
-        try:
+        with torch.cuda.stream(stream):
             det = raw_output[0]  # (N, last)
             conf = det[:, 4]
             # Use GPU argmax (no D2H here). gather best row directly.
@@ -314,8 +308,6 @@ class GpuPostprocessor:
                 valid=True,
                 depth_invalid_ratio=invalid_ratio,
             )
-        finally:
-            torch.cuda.set_stream(_prev_post_stream)
 
     # ------------------------------------------------------------------
     def _maybe_sticky(self, box_conf: float) -> PoseResult:

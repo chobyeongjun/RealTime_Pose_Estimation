@@ -17,7 +17,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Deque, Optional
+from typing import Deque, Optional
 
 import torch
 
@@ -274,23 +274,17 @@ class StreamedPosePipeline:
             self._try_capture_inf_graph(inf)
 
         self.tracer.mark_start("inf", inf.stream)
-        # CRITICAL: use set_stream (NOT torch.cuda.stream() context manager).
-        # The context manager does stream.wait_stream(stream_0) on entry and
-        # stream_0.wait_stream(stream) on exit — creating a bidirectional
-        # dependency with stream_0 (which carries ZED SDK CUDA work) on EVERY
-        # frame. This inflates inf from ~4ms to 7-15ms and drops FPS 79→45.
-        # set_stream just moves the current-stream pointer; no wait issued.
-        # CUDAGraph.replay() uses getCurrentCUDAStream() (PyTorch 2.x), so
-        # we must set the current stream before calling it.
-        _prev_stream = torch.cuda.current_stream(self.sm.device)
-        torch.cuda.set_stream(inf.stream)
         if self._inf_graph is not None and self._inf_graph.captured:
-            self._inf_graph.replay()
+            # PyTorch 2.x CUDAGraph.replay() uses getCurrentCUDAStream(),
+            # NOT the internally stored capture stream. Without this context
+            # manager the graph launches on stream 0 — both timing events
+            # and inf.record_done() fire with no real work between them,
+            # giving inf=0ms and corrupting the post-stage dependency.
+            with torch.cuda.stream(inf.stream):
+                self._inf_graph.replay()
         else:
-            # infer_async takes an explicit stream_ptr — current stream is
-            # only needed so any incidental PyTorch allocs go to inf.stream.
-            self.runner.infer_async(self.sm.stream_ptr("infer"))
-        torch.cuda.set_stream(_prev_stream)
+            with torch.cuda.stream(inf.stream):
+                self.runner.infer_async(self.sm.stream_ptr("infer"))
         self.tracer.mark_end("inf", inf.stream)
         inf.record_done()
 
@@ -308,7 +302,8 @@ class StreamedPosePipeline:
         self.tracer.mark_end("post", po.stream)
         po.record_done()
         po.stream.synchronize()  # only sync point in the hot path
-        t_end = time.perf_counter()  # e2e = GPU pipeline only (pre+inf+post)
+        t_end = time.perf_counter()        # GPU pipeline only (pre+inf+post)
+        t_gpu_done_ns = time.time_ns()     # true_e2e anchor — before constraint CPU
 
         # --- stage D: optional constraint gate + occlusion fallback
         # Runs AFTER t_end so constraint CPU overhead does not inflate e2e.
@@ -337,7 +332,7 @@ class StreamedPosePipeline:
             latency_ms={
                 "e2e": (t_end - t_start) * 1e3,
                 "constraint_ms": constraint_ms,
-                "true_e2e_ms": (time.time_ns() - frame.ts_ns) / 1e6,
+                "true_e2e_ms": (t_gpu_done_ns - frame.ts_ns) / 1e6,
                 **{f"{k}_ms": v for k, v in trace.stage_ms.items()},
                 **frame.capture_ms,  # grab_ms, retrieve_rgb_ms, getdata_rgb_ms, etc.
             },
