@@ -324,6 +324,7 @@ class StreamedPosePipeline:
                 "e2e": (t_end - t_start) * 1e3,
                 "true_e2e_ms": (time.time_ns() - frame.ts_ns) / 1e6,
                 **{f"{k}_ms": v for k, v in trace.stage_ms.items()},
+                **frame.capture_ms,  # grab_ms, retrieve_rgb_ms, getdata_rgb_ms, etc.
             },
         )
         return tick

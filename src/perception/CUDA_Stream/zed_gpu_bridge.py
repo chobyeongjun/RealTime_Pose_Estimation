@@ -126,6 +126,7 @@ class ZEDFrame:
     frame_id: int
     calibration: Dict[str, Any] = field(default_factory=dict)
     ready_event: Optional["torch.cuda.Event"] = None
+    capture_ms: Dict[str, float] = field(default_factory=dict)  # per-step CPU timings
 
 
 class ZEDGpuBridge:
@@ -399,23 +400,42 @@ class ZEDGpuBridge:
             return self._grab_webcam()
         assert self._zed is not None and sl is not None
         rt = sl.RuntimeParameters()
+        cap = {}
+
+        t0 = time.perf_counter()
         if self._zed.grab(rt) != sl.ERROR_CODE.SUCCESS:
             return None
+        cap["grab_ms"] = (time.perf_counter() - t0) * 1e3
+
         ts_ns = int(
             self._zed.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_nanoseconds()
         )
+
+        t0 = time.perf_counter()
         self._zed.retrieve_image(self._image_mat, sl.VIEW.LEFT)
+        cap["retrieve_rgb_ms"] = (time.perf_counter() - t0) * 1e3
+
+        t0 = time.perf_counter()
         # IMPORTANT: skiro-learnings — always copy=True to avoid race with
         # next grab(); the copy cost at SVGA is ~0.5ms.
         bgra_host = self._image_mat.get_data(deep_copy=True)
         rgb_host = np.ascontiguousarray(bgra_host[:, :, :3][:, :, ::-1])  # BGR->RGB
+        cap["getdata_rgb_ms"] = (time.perf_counter() - t0) * 1e3
+
+        t0 = time.perf_counter()
         rgb_pinned = self._get_pinned_rgb(rgb_host)
+        cap["pinned_rgb_ms"] = (time.perf_counter() - t0) * 1e3
 
         depth_pinned = None
         if self.enable_depth:
+            t0 = time.perf_counter()
             self._zed.retrieve_measure(self._depth_mat, sl.MEASURE.DEPTH)
+            cap["retrieve_depth_ms"] = (time.perf_counter() - t0) * 1e3
+
+            t0 = time.perf_counter()
             depth_host = self._depth_mat.get_data(deep_copy=True)
             depth_pinned = self._get_pinned_depth(depth_host)
+            cap["getdata_depth_ms"] = (time.perf_counter() - t0) * 1e3
 
         rgb_gpu, depth_gpu, ready_event = self._upload(rgb_pinned, depth_pinned)
 
@@ -427,6 +447,7 @@ class ZEDGpuBridge:
             frame_id=self._frame_id,
             calibration=dict(self._calibration),  # snapshot copy — not a reference
             ready_event=ready_event,
+            capture_ms=cap,
         )
 
     # ------------------------------------------------------------------
@@ -491,7 +512,7 @@ class ZEDGpuBridge:
                 if depth_pinned is not None
                 else None
             )
-            event = torch.cuda.Event(enable_timing=False, blocking=False)
+            event = torch.cuda.Event(enable_timing=True, blocking=False)
             event.record(self._h2d_stream)
         return rgb_gpu, depth_gpu, event
 

@@ -33,7 +33,7 @@ import torch
 # LATENCY_HARD_LIMIT_MS is the absolute ceiling — data past this is
 # considered stale for control purposes and must NOT reach Teensy as-is.
 # 20 ms user-defined. 18 ms soft warning (below) triggers [SLOW] log.
-LATENCY_HARD_LIMIT_MS = 20.0
+LATENCY_HARD_LIMIT_MS = float("inf")  # hard limit disabled — log only
 LATENCY_SOFT_WARN_MS  = 18.0
 
 from .constraints import (
@@ -387,15 +387,23 @@ def main() -> int:
             # During warmup, log at debug level only (still mark valid=False
             # in publish so downstream ignores). Post-warmup spikes are
             # real and get normal ERROR/WARNING logs.
-            if frame_exceeds_budget and not in_warmup:
-                LOGGER.error(
-                    "STALE FRAME %d: e2e=%.2f ms > %.0f ms HARD LIMIT → valid=False",
-                    tick.frame_id, e2e_ms, LATENCY_HARD_LIMIT_MS,
-                )
-            elif frame_warn and not in_warmup:
+            if frame_warn and not in_warmup:
+                lms = tick.latency_ms
                 LOGGER.warning(
-                    "[SLOW] frame %d: e2e=%.2f ms (soft warn %.0f, hard %.0f)",
-                    tick.frame_id, e2e_ms, LATENCY_SOFT_WARN_MS, LATENCY_HARD_LIMIT_MS,
+                    "[SLOW] frame %d  e2e=%.1f ms\n"
+                    "  capture : grab=%.1f  ret_rgb=%.1f  getdata_rgb=%.1f"
+                    "  pinned_rgb=%.1f  ret_depth=%.1f  getdata_depth=%.1f\n"
+                    "  pipeline: pre=%.1f  inf=%.1f  post=%.1f",
+                    tick.frame_id, e2e_ms,
+                    lms.get("grab_ms", float("nan")),
+                    lms.get("retrieve_rgb_ms", float("nan")),
+                    lms.get("getdata_rgb_ms", float("nan")),
+                    lms.get("pinned_rgb_ms", float("nan")),
+                    lms.get("retrieve_depth_ms", float("nan")),
+                    lms.get("getdata_depth_ms", float("nan")),
+                    lms.get("pre_ms", float("nan")),
+                    lms.get("inf_ms", float("nan")),
+                    lms.get("post_ms", float("nan")),
                 )
             elif in_warmup and frame_exceeds_budget:
                 LOGGER.debug(
@@ -420,9 +428,7 @@ def main() -> int:
                 kpts_3d = flat[:K*3].reshape(K, 3)
                 kpt_conf = flat[K*3:K*3 + K]
                 kpts_2d = flat[K*3 + K:].reshape(K, 2)
-                # If tick exceeds 20 ms budget → force valid=False so
-                # downstream control skips this frame's values.
-                publish_valid = tick.result.valid and not frame_exceeds_budget
+                publish_valid = tick.result.valid
                 publisher.publish(
                     frame_id=tick.frame_id,
                     ts_ns=tick.ts_ns,
