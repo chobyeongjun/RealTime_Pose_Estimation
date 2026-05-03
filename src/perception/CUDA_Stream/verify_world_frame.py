@@ -65,11 +65,14 @@ def run(n_frames: int = 150) -> bool:
         frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d, box_conf, valid, depth_inv, world_flag = data
         read_count += 1
 
-        world_frame_flags.append(int(world_flag))
-
         if not valid:
             continue
         valid_count += 1
+
+        # Only count world_frame_applied on valid frames — zeroed SHM
+        # (pipeline warmup / just started) has world_flag=0 but those are
+        # not meaningful frames. Counting them gives false 0% rate.
+        world_frame_flags.append(int(world_flag))
 
         # collect Y (height) and Z (depth) for hip/knee/ankle
         # z > 0 guard: ankle_conf_threshold=0.72 zeroes depth when conf is
@@ -112,6 +115,14 @@ def run(n_frames: int = 150) -> bool:
 
     reader.close()
     print()
+
+    if valid_count == 0:
+        print(f"\n[ERROR] 0 valid frames in {read_count} reads.")
+        print("  Possible causes:")
+        print("  1. Pipeline just started — wait 3s for warmup then retry")
+        print("  2. No subject in camera view (valid=False from postprocessor)")
+        print("  3. SHM is stale from a previous run (pipeline not running)")
+        return False
 
     # ── Check 1: world_frame_applied ──────────────────────────────────
     wf_rate = np.mean(world_frame_flags) if world_frame_flags else 0.0
