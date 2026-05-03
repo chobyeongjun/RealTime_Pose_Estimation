@@ -313,6 +313,9 @@ def main() -> int:
     ticks = 0
     warmup_ticks_skipped = 0
     latencies: list[float] = []
+    true_e2e_list: list[float] = []
+    _last_stats_t = time.monotonic()
+    STATS_INTERVAL_S = 10.0   # print rolling stats every 10s
     try:
         while not stop_flag["stop"]:
             if time.monotonic() - t0 > args.duration:
@@ -322,6 +325,7 @@ def main() -> int:
                 continue
             ticks += 1
             e2e_ms = tick.latency_ms["e2e"]
+            true_e2e_ms = tick.latency_ms.get("true_e2e_ms", float("nan"))
 
             # Skip first N real-pipeline frames from stats (warmup).
             # They still publish normally so downstream control isn't
@@ -329,8 +333,47 @@ def main() -> int:
             in_warmup = ticks <= WARMUP_SKIP_FRAMES
             if not in_warmup:
                 latencies.append(e2e_ms)
+                if not np.isnan(true_e2e_ms):
+                    true_e2e_list.append(true_e2e_ms)
             else:
                 warmup_ticks_skipped = ticks  # keep latest for log
+
+            # ─── Rolling stats every STATS_INTERVAL_S ──────────────────
+            now = time.monotonic()
+            if not in_warmup and now - _last_stats_t >= STATS_INTERVAL_S and latencies:
+                _last_stats_t = now
+                arr = np.asarray(latencies)
+                mn, p50, p95, p99, mx = np.percentile(arr, [0, 50, 95, 99, 100])
+                n_over = int((arr > LATENCY_HARD_LIMIT_MS).sum())
+                n_total = len(arr)
+                elapsed = max(now - t0, 1e-3)
+                fps_live = ticks / elapsed
+                true_p99 = float(np.percentile(true_e2e_list, 99)) if true_e2e_list else float("nan")
+                # bucket counts for distribution line
+                b = [
+                    int((arr < 10).sum()),
+                    int(((arr >= 10) & (arr < 14)).sum()),
+                    int(((arr >= 14) & (arr < 18)).sum()),
+                    int(((arr >= 18) & (arr < 20)).sum()),
+                    int((arr >= 20).sum()),
+                ]
+                pct = [f"{x/n_total*100:.0f}%" for x in b]
+                LOGGER.info(
+                    "[STATS t=%ds] frames=%d fps=%.1f  STALE=%d(%.2f%%)",
+                    int(elapsed), n_total, fps_live, n_over, n_over / n_total * 100,
+                )
+                LOGGER.info(
+                    "  e2e:      min=%.1f  p50=%.1f  p95=%.1f  p99=%.1f  max=%.1f ms",
+                    mn, p50, p95, p99, mx,
+                )
+                LOGGER.info(
+                    "  true_e2e: p99=%.1f ms",
+                    true_p99,
+                )
+                LOGGER.info(
+                    "  dist: <10ms=%s | 10-14ms=%s | 14-18ms=%s | 18-20ms=%s | >=20ms=%s",
+                    *pct,
+                )
 
             # ─── 20 ms HARD BOUND — frame skip if exceeded ─────────────
             # Any tick that took more than 20 ms is STALE for real-time
