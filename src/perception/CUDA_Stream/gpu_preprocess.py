@@ -78,16 +78,21 @@ class GpuPreprocessor:
         pad_x = (self.imgsz - nw) // 2
         pad_y = (self.imgsz - nh) // 2
 
-        with torch.cuda.stream(stream):
-            # uint8 (H,W,3) -> float (1,3,H,W) normalized
-            img = rgb_u8.permute(2, 0, 1).unsqueeze(0).to(self.dtype) / 255.0
-            # bilinear resize to (1,3,nh,nw)
-            resized = F.interpolate(
-                img, size=(nh, nw), mode="bilinear", align_corners=False
-            )
-            # pad to imgsz with gray (114/255)
-            self.out.fill_(self.pad_value)
-            self.out[:, :, pad_y : pad_y + nh, pad_x : pad_x + nw] = resized
+        # Use set_stream (not torch.cuda.stream() context manager) — same
+        # reason as pipeline.py: the context manager injects wait_stream(stream_0)
+        # which couples pre.stream to ZED SDK CUDA work on stream_0.
+        _prev_pre_stream = torch.cuda.current_stream(self.device)
+        torch.cuda.set_stream(stream)
+        # uint8 (H,W,3) -> float (1,3,H,W) normalized
+        img = rgb_u8.permute(2, 0, 1).unsqueeze(0).to(self.dtype) / 255.0
+        # bilinear resize to (1,3,nh,nw)
+        resized = F.interpolate(
+            img, size=(nh, nw), mode="bilinear", align_corners=False
+        )
+        # pad to imgsz with gray (114/255)
+        self.out.fill_(self.pad_value)
+        self.out[:, :, pad_y : pad_y + nh, pad_x : pad_x + nw] = resized
+        torch.cuda.set_stream(_prev_pre_stream)
 
         self.last_params = LetterboxParams(
             scale=scale,

@@ -274,17 +274,23 @@ class StreamedPosePipeline:
             self._try_capture_inf_graph(inf)
 
         self.tracer.mark_start("inf", inf.stream)
+        # CRITICAL: use set_stream (NOT torch.cuda.stream() context manager).
+        # The context manager does stream.wait_stream(stream_0) on entry and
+        # stream_0.wait_stream(stream) on exit — creating a bidirectional
+        # dependency with stream_0 (which carries ZED SDK CUDA work) on EVERY
+        # frame. This inflates inf from ~4ms to 7-15ms and drops FPS 79→45.
+        # set_stream just moves the current-stream pointer; no wait issued.
+        # CUDAGraph.replay() uses getCurrentCUDAStream() (PyTorch 2.x), so
+        # we must set the current stream before calling it.
+        _prev_stream = torch.cuda.current_stream(self.sm.device)
+        torch.cuda.set_stream(inf.stream)
         if self._inf_graph is not None and self._inf_graph.captured:
-            # PyTorch 2.x CUDAGraph.replay() uses getCurrentCUDAStream(),
-            # NOT the internally stored capture stream. Without this context
-            # manager the graph launches on stream 0 — both timing events
-            # and inf.record_done() fire with no real work between them,
-            # giving inf=0ms and corrupting the post-stage dependency.
-            with torch.cuda.stream(inf.stream):
-                self._inf_graph.replay()
+            self._inf_graph.replay()
         else:
-            with torch.cuda.stream(inf.stream):
-                self.runner.infer_async(self.sm.stream_ptr("infer"))
+            # infer_async takes an explicit stream_ptr — current stream is
+            # only needed so any incidental PyTorch allocs go to inf.stream.
+            self.runner.infer_async(self.sm.stream_ptr("infer"))
+        torch.cuda.set_stream(_prev_stream)
         self.tracer.mark_end("inf", inf.stream)
         inf.record_done()
 
