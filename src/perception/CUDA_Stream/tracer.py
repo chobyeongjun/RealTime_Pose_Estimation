@@ -102,6 +102,8 @@ class PipelineTracer:
         device: Optional[torch.device] = None,
         ring_size: int = 256,
     ) -> None:
+        # ``enabled`` gates CSV writing only. GPU event timing is always on
+        # so that pre/inf/post_ms appear in [SLOW] logs without --trace.
         self.enabled = enabled
         self.csv_path = Path(csv_path) if csv_path else None
         self.device = device or torch.device("cuda:0")
@@ -109,7 +111,7 @@ class PipelineTracer:
         self._current = FrameTrace()
         self._rows: List[Dict[str, Any]] = []
         self.ring_size = ring_size
-        if enabled and torch.cuda.is_available():
+        if torch.cuda.is_available():
             for s in STAGE_NAMES:
                 self._events[s] = (
                     torch.cuda.Event(enable_timing=True),
@@ -124,12 +126,12 @@ class PipelineTracer:
         self._current.t_host_start = time.perf_counter()
 
     def mark_start(self, stage: str, stream: torch.cuda.Stream) -> None:
-        if not self.enabled or stage not in self._events:
+        if stage not in self._events:
             return
         self._events[stage][0].record(stream)
 
     def mark_end(self, stage: str, stream: torch.cuda.Stream) -> None:
-        if not self.enabled or stage not in self._events:
+        if stage not in self._events:
             return
         self._events[stage][1].record(stream)
 
@@ -150,19 +152,17 @@ class PipelineTracer:
     def end(self) -> FrameTrace:
         """Called AFTER post_stream.synchronize() — safe to read events."""
         self._current.t_host_end = time.perf_counter()
+        for stage, (a, b) in self._events.items():
+            try:
+                self._current.stage_ms[stage] = a.elapsed_time(b)
+            except Exception as err:  # pragma: no cover
+                LOGGER.debug("tracer elapsed_time %s failed: %s", stage, err)
+                self._current.stage_ms[stage] = 0.0
         if self.enabled:
-            for stage, (a, b) in self._events.items():
-                try:
-                    self._current.stage_ms[stage] = a.elapsed_time(b)
-                except Exception as err:  # pragma: no cover
-                    # Events may not have been recorded (stage skipped)
-                    LOGGER.debug("tracer elapsed_time %s failed: %s", stage, err)
-                    self._current.stage_ms[stage] = 0.0
-        row = self._current.to_row()
-        self._rows.append(row)
-        if len(self._rows) > self.ring_size and self.csv_path is None:
-            # keep memory bounded when we're not dumping to disk
-            self._rows.pop(0)
+            row = self._current.to_row()
+            self._rows.append(row)
+            if len(self._rows) > self.ring_size and self.csv_path is None:
+                self._rows.pop(0)
         return self._current
 
     # ------------------------------------------------------------------
