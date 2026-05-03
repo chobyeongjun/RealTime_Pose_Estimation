@@ -103,6 +103,21 @@ def parse_args() -> argparse.Namespace:
         help="manual forward pitch override (e.g. 32 for camera mounted "
              "leaning 32° down). Overrides IMU warmup — most reliable path.",
     )
+    ap.add_argument(
+        "--max-capture-fps", type=int, default=None,
+        help="throttle ZED grab rate (default: unlimited = camera fps). "
+             "Set to ~90 on Orin NX to reduce ZED PERFORMANCE depth SM "
+             "contention with TRT inference. ZED still captures at hardware "
+             "fps; we just call grab() less often, reducing wasted depth "
+             "computes (~33%% fewer at 90fps vs 120fps).",
+    )
+    ap.add_argument(
+        "--depth-decimation", type=int, default=1,
+        help="retrieve ZED depth every N frames (default 1 = every frame). "
+             "2 = depth at ~60fps on SVGA@120fps, halving ZED PERFORMANCE "
+             "GPU work and SM contention with TRT. Intermediate frames reuse "
+             "the last depth map (safe at 120fps — depth changes < 1cm/frame).",
+    )
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
@@ -245,6 +260,8 @@ def main() -> int:
         enable_depth=args.depth_mode != "NONE",
         world_frame=not args.no_world_frame,
         manual_pitch_deg=args.camera_pitch_deg,
+        max_capture_fps=args.max_capture_fps,
+        depth_decimation=args.depth_decimation,
     )
     bridge.open()
     bridge.start()

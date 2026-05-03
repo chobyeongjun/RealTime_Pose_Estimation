@@ -34,6 +34,12 @@ try:
 except ImportError:  # pragma: no cover — dev/CI path
     sl = None
 
+try:
+    import cv2 as _cv2  # NEON SIMD BGRA→RGB on ARM; 3-5× faster than numpy flip
+    _HAVE_CV2 = True
+except ImportError:  # pragma: no cover
+    _HAVE_CV2 = False
+
 
 RES_MAP = {
     "SVGA": "SVGA",
@@ -144,6 +150,8 @@ class ZEDGpuBridge:
         world_frame: bool = True,       # compute IMU-based R at warmup
         imu_warmup_frames: int = 20,    # gravity vector average window
         manual_pitch_deg: Optional[float] = None,  # override IMU with pitch angle
+        max_capture_fps: Optional[int] = None,  # throttle grab rate to reduce ZED SM contention
+        depth_decimation: int = 1,  # retrieve depth every Nth frame (2=half rate, reduces SM contention)
     ) -> None:
         self.device = device or torch.device("cuda:0")
         self.resolution = resolution
@@ -155,6 +163,9 @@ class ZEDGpuBridge:
         self.imu_warmup_frames = imu_warmup_frames
         self.manual_pitch_deg = manual_pitch_deg
 
+        self.max_capture_fps = max_capture_fps
+        self.depth_decimation = max(1, int(depth_decimation))
+        self._grab_counter: int = 0
         self._frames: Deque[ZEDFrame] = deque(maxlen=queue_size)
         self._frames_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -166,14 +177,19 @@ class ZEDGpuBridge:
         # Private CUDA stream for H2D copies. Kept isolated from the
         # pipeline's streams to avoid polluting the default stream.
         self._h2d_stream: Optional[torch.cuda.Stream] = None
-        # Pre-allocated pinned host buffer ring (one per slot in the
-        # frame deque, +1 for the in-flight buffer the capture thread
-        # is writing). Re-using these buffers eliminates the per-frame
-        # pin_memory() cost (0.5-2ms variance — biggest spike source).
+        # Pre-allocated pinned host buffer ring (CPU) + GPU destination ring.
+        # Both rings use the same slot index (_pool_idx) and size.
+        # CPU ring: eliminates per-frame pin_memory() cost (0.5-2ms spike).
+        # GPU ring: eliminates per-frame cudaMalloc inside .to(device).
         self._pool_size = queue_size + 1
         self._rgb_pool: list[torch.Tensor] = []
         self._depth_pool: list[torch.Tensor] = []
         self._pool_idx = 0
+        # GPU destination tensors (pre-allocated on first _upload call)
+        self._rgb_gpu_pool: list[torch.Tensor] = []
+        self._depth_gpu_pool: list[torch.Tensor] = []
+        # Last uploaded depth tensor — reused on decimated (depth-skipped) frames
+        self._last_depth_gpu: Optional[torch.Tensor] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -385,8 +401,22 @@ class ZEDGpuBridge:
     # Hot path
     # ------------------------------------------------------------------
     def _capture_loop(self) -> None:
+        # Optional grab-rate throttle: ZED SVGA runs at 120fps but the
+        # pipeline processes ~80fps. Each grab() triggers PERFORMANCE
+        # depth on GPU — the surplus 40fps of depth compute competes with
+        # TRT inference for Orin NX's shared SMs. Throttling to ~90fps
+        # adds a ~3ms gap between grabs, giving TRT a clear window.
+        _min_grab_interval = (
+            1.0 / self.max_capture_fps if self.max_capture_fps else 0.0
+        )
+        _t_last_grab = 0.0
         while not self._stop_event.is_set():
+            if _min_grab_interval > 0:
+                remaining = _min_grab_interval - (time.perf_counter() - _t_last_grab)
+                if remaining > 0.001:
+                    time.sleep(remaining)
             try:
+                _t_last_grab = time.perf_counter()
                 frame = self._grab_one()
                 if frame is not None:
                     with self._frames_lock:
@@ -419,15 +449,25 @@ class ZEDGpuBridge:
         # IMPORTANT: skiro-learnings — always copy=True to avoid race with
         # next grab(); the copy cost at SVGA is ~0.5ms.
         bgra_host = self._image_mat.get_data(deep_copy=True)
-        rgb_host = np.ascontiguousarray(bgra_host[:, :, :3][:, :, ::-1])  # BGR->RGB
+        # cv2.cvtColor uses NEON SIMD on ARM (Jetson) → ~3-5× faster than
+        # np.ascontiguousarray(bgra[:,:,:3][:,:,::-1]) which lacks SIMD.
+        # Falls back to numpy if cv2 is absent (dev machines).
+        if _HAVE_CV2:
+            rgb_host = _cv2.cvtColor(bgra_host, _cv2.COLOR_BGRA2RGB)
+        else:
+            rgb_host = np.ascontiguousarray(bgra_host[:, :, :3][:, :, ::-1])
         cap["getdata_rgb_ms"] = (time.perf_counter() - t0) * 1e3
 
         t0 = time.perf_counter()
         rgb_pinned = self._get_pinned_rgb(rgb_host)
         cap["pinned_rgb_ms"] = (time.perf_counter() - t0) * 1e3
 
-        depth_pinned = None
-        if self.enable_depth:
+        # Depth decimation: retrieve depth every self.depth_decimation frames.
+        # On non-depth frames the last GPU depth tensor is reused (safe because
+        # depth changes slowly at 120fps and the pipeline uses it read-only).
+        self._grab_counter += 1
+        depth_pinned: Optional[torch.Tensor] = None
+        if self.enable_depth and (self._grab_counter % self.depth_decimation == 0):
             t0 = time.perf_counter()
             self._zed.retrieve_measure(self._depth_mat, sl.MEASURE.DEPTH)
             cap["retrieve_depth_ms"] = (time.perf_counter() - t0) * 1e3
@@ -437,7 +477,12 @@ class ZEDGpuBridge:
             depth_pinned = self._get_pinned_depth(depth_host)
             cap["getdata_depth_ms"] = (time.perf_counter() - t0) * 1e3
 
-        rgb_gpu, depth_gpu, ready_event = self._upload(rgb_pinned, depth_pinned)
+        # Advance pool slot once per frame (was inside _get_pinned_depth before,
+        # which broke pool rotation when depth was skipped or disabled).
+        _slot = self._pool_idx % self._pool_size
+        self._pool_idx += 1
+
+        rgb_gpu, depth_gpu, ready_event = self._upload(rgb_pinned, depth_pinned, _slot)
 
         self._frame_id += 1
         return ZEDFrame(
@@ -484,7 +529,7 @@ class ZEDGpuBridge:
                 for _ in range(self._pool_size)
             ]
         slot = self._pool_idx % self._pool_size
-        self._pool_idx += 1  # advance once per frame (rgb was slot N, depth reuses N)
+        # NOTE: _pool_idx is advanced once per frame in _grab_one (not here).
         buf = self._depth_pool[slot]
         buf.copy_(torch.from_numpy(host))
         return buf
@@ -493,28 +538,47 @@ class ZEDGpuBridge:
         self,
         rgb_pinned: torch.Tensor,
         depth_pinned: Optional[torch.Tensor],
+        slot: int,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional["torch.cuda.Event"]]:
-        """Run H2D on the private capture stream and record a ready event."""
+        """H2D on the private capture stream using pre-allocated GPU ring.
+
+        Using a pre-allocated GPU destination ring eliminates the per-frame
+        cudaMalloc that .to(device) would otherwise trigger (~0.5–1ms each).
+        ``slot`` is the ring index for this frame (managed by _grab_one).
+        ``depth_pinned=None`` means depth was decimated — _last_depth_gpu is reused.
+        """
         if self._h2d_stream is None:
-            # e.g. CUDA unavailable → eager path (dev machines)
+            # CUDA unavailable (dev/CI) — eager fallback, no ring needed
             rgb_gpu = rgb_pinned.to(self.device, non_blocking=True)
-            depth_gpu = (
-                depth_pinned.to(self.device, non_blocking=True)
-                if depth_pinned is not None
-                else None
-            )
-            return rgb_gpu, depth_gpu, None
+            if depth_pinned is not None:
+                self._last_depth_gpu = depth_pinned.to(self.device, non_blocking=True)
+            return rgb_gpu, self._last_depth_gpu, None
+
+        # Lazy GPU ring allocation on first call (shape known only at runtime)
+        if not self._rgb_gpu_pool:
+            self._rgb_gpu_pool = [
+                torch.empty(rgb_pinned.shape, dtype=torch.uint8, device=self.device)
+                for _ in range(self._pool_size)
+            ]
+        if depth_pinned is not None and not self._depth_gpu_pool:
+            self._depth_gpu_pool = [
+                torch.empty(depth_pinned.shape, dtype=torch.float32, device=self.device)
+                for _ in range(self._pool_size)
+            ]
 
         with torch.cuda.stream(self._h2d_stream):
-            rgb_gpu = rgb_pinned.to(self.device, non_blocking=True)
-            depth_gpu = (
-                depth_pinned.to(self.device, non_blocking=True)
-                if depth_pinned is not None
-                else None
-            )
+            rgb_dst = self._rgb_gpu_pool[slot]
+            rgb_dst.copy_(rgb_pinned, non_blocking=True)
+
+            if depth_pinned is not None:
+                depth_dst = self._depth_gpu_pool[slot]
+                depth_dst.copy_(depth_pinned, non_blocking=True)
+                self._last_depth_gpu = depth_dst
+
             event = torch.cuda.Event(enable_timing=True, blocking=False)
             event.record(self._h2d_stream)
-        return rgb_gpu, depth_gpu, event
+
+        return rgb_dst, self._last_depth_gpu, event
 
     def _grab_webcam(self) -> Optional[ZEDFrame]:
         ok, bgr = self._webcam.read()
