@@ -441,6 +441,27 @@ class ZEDGpuBridge:
             self._zed.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_nanoseconds()
         )
 
+        # Retrieve depth BEFORE RGB. ZED SDK returns image and depth from the
+        # same grab() call; whichever we call first blocks until ZED's GPU
+        # processing is done. Calling retrieve_measure immediately after grab()
+        # means no TRT inference is running yet on the pipeline thread, so ZED
+        # PERFORMANCE depth runs on uncontested SMs (~3ms). If we retrieve RGB
+        # first and call retrieve_measure later (~2ms after grab), TRT has
+        # started and ZED depth has to fight for SMs → spikes to 10-15ms.
+        self._grab_counter += 1
+        depth_pinned: Optional[torch.Tensor] = None
+        if self.enable_depth and (self._grab_counter % self.depth_decimation == 0):
+            t0 = time.perf_counter()
+            self._zed.retrieve_measure(self._depth_mat, sl.MEASURE.DEPTH)
+            cap["retrieve_depth_ms"] = (time.perf_counter() - t0) * 1e3
+
+            t0 = time.perf_counter()
+            depth_host = self._depth_mat.get_data(deep_copy=True)
+            depth_pinned = self._get_pinned_depth(depth_host)
+            cap["getdata_depth_ms"] = (time.perf_counter() - t0) * 1e3
+
+        # RGB retrieval follows depth. ZED's processing is already done by now
+        # so retrieve_image returns almost immediately.
         t0 = time.perf_counter()
         self._zed.retrieve_image(self._image_mat, sl.VIEW.LEFT)
         cap["retrieve_rgb_ms"] = (time.perf_counter() - t0) * 1e3
@@ -461,21 +482,6 @@ class ZEDGpuBridge:
         t0 = time.perf_counter()
         rgb_pinned = self._get_pinned_rgb(rgb_host)
         cap["pinned_rgb_ms"] = (time.perf_counter() - t0) * 1e3
-
-        # Depth decimation: retrieve depth every self.depth_decimation frames.
-        # On non-depth frames the last GPU depth tensor is reused (safe because
-        # depth changes slowly at 120fps and the pipeline uses it read-only).
-        self._grab_counter += 1
-        depth_pinned: Optional[torch.Tensor] = None
-        if self.enable_depth and (self._grab_counter % self.depth_decimation == 0):
-            t0 = time.perf_counter()
-            self._zed.retrieve_measure(self._depth_mat, sl.MEASURE.DEPTH)
-            cap["retrieve_depth_ms"] = (time.perf_counter() - t0) * 1e3
-
-            t0 = time.perf_counter()
-            depth_host = self._depth_mat.get_data(deep_copy=True)
-            depth_pinned = self._get_pinned_depth(depth_host)
-            cap["getdata_depth_ms"] = (time.perf_counter() - t0) * 1e3
 
         # Advance pool slot once per frame (was inside _get_pinned_depth before,
         # which broke pool rotation when depth was skipped or disabled).
