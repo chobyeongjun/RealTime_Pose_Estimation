@@ -17,7 +17,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Optional
+from typing import Any, Deque, Optional
 
 import torch
 
@@ -308,13 +308,16 @@ class StreamedPosePipeline:
         self.tracer.mark_end("post", po.stream)
         po.record_done()
         po.stream.synchronize()  # only sync point in the hot path
+        t_end = time.perf_counter()  # e2e = GPU pipeline only (pre+inf+post)
 
         # --- stage D: optional constraint gate + occlusion fallback
+        # Runs AFTER t_end so constraint CPU overhead does not inflate e2e.
         world_frame_applied = "R_world_from_cam" in frame.calibration
+        t_constraint = time.perf_counter()
         final_result = self._apply_constraints_and_fallback(
             result, ts_s=frame.ts_ns * 1e-9
         )
-        t_end = time.perf_counter()
+        constraint_ms = (time.perf_counter() - t_constraint) * 1e3
 
         # Emit trace AFTER synchronize so elapsed_time is safe to read.
         self.tracer.set_result_meta(
@@ -333,6 +336,7 @@ class StreamedPosePipeline:
             world_frame_applied=world_frame_applied,
             latency_ms={
                 "e2e": (t_end - t_start) * 1e3,
+                "constraint_ms": constraint_ms,
                 "true_e2e_ms": (time.time_ns() - frame.ts_ns) / 1e6,
                 **{f"{k}_ms": v for k, v in trace.stage_ms.items()},
                 **frame.capture_ms,  # grab_ms, retrieve_rgb_ms, getdata_rgb_ms, etc.
