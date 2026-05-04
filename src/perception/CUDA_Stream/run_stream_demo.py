@@ -322,6 +322,14 @@ def main() -> int:
     bridge_proc_list: list[float] = []
     queue_wait_list: list[float] = []
     pipeline_proc_list: list[float] = []
+    # actual SHM publish latency — measured AFTER publisher.publish() returns.
+    # This is the safety-relevant metric (control-visible). true_e2e_ms only
+    # covers up to GPU done; actual_publish_ms includes the post-GPU D2H
+    # batch + SHM seqlock write.
+    actual_publish_list: list[float] = []
+    # frame_skip: how often bridge.latest() returned None (consume-once + no
+    # new frame within timeout). High ratio means bridge is the bottleneck.
+    frame_skip_count = 0
     _last_stats_t = time.monotonic()
     STATS_INTERVAL_S = 10.0   # print rolling stats every 10s
     try:
@@ -330,6 +338,9 @@ def main() -> int:
                 break
             tick = pipeline.run_overlapped_step()
             if tick is None:
+                # bridge had no new frame within its 0.5s poll window.
+                # Skip publish (don't ship stale data); count for diagnostics.
+                frame_skip_count += 1
                 continue
             ticks += 1
             e2e_ms = tick.latency_ms["e2e"]
@@ -388,9 +399,17 @@ def main() -> int:
                 n_over_true = int((tr_arr > LATENCY_HARD_LIMIT_MS).sum()) if tr_arr.size else 0
                 pct_over_true = (n_over_true / tr_arr.size * 100) if tr_arr.size else 0.0
 
+                ap_p50 = _pct_arr(actual_publish_list, 50)
+                ap_p99 = _pct_arr(actual_publish_list, 99)
+                ap_max = max(actual_publish_list) if actual_publish_list else float("nan")
+                # frame_skip ratio: None returns / (None returns + processed frames)
+                skip_total = frame_skip_count + ticks
+                skip_ratio = (frame_skip_count / skip_total * 100) if skip_total else 0.0
+
                 LOGGER.info(
-                    "[STATS t=%ds] frames=%d fps=%.1f  HARD(true_e2e>%dms)=%d(%.2f%%)",
+                    "[STATS t=%ds] frames=%d fps=%.1f  skip=%d(%.1f%%)  HARD(true_e2e>%dms)=%d(%.2f%%)",
                     int(elapsed), n_total, fps_live,
+                    frame_skip_count, skip_ratio,
                     int(LATENCY_HARD_LIMIT_MS), n_over_true, pct_over_true,
                 )
                 LOGGER.info(
@@ -398,8 +417,12 @@ def main() -> int:
                     mn, p50, p95, p99, mx,
                 )
                 LOGGER.info(
-                    "  true_e2e (cam→gpu_done): p50=%.1f  p99=%.1f  max=%.1f ms",
+                    "  true_e2e (cam→gpu_done):  p50=%.1f  p99=%.1f  max=%.1f ms",
                     tr_p50, tr_p99, tr_max,
+                )
+                LOGGER.info(
+                    "  actual_publish (cam→shm): p50=%.1f  p99=%.1f  max=%.1f ms",
+                    ap_p50, ap_p99, ap_max,
                 )
                 LOGGER.info(
                     "  decomp p50/p99: bridge_proc=%.1f/%.1f  queue_wait=%.1f/%.1f  pipeline_proc=%.1f/%.1f ms",
@@ -468,7 +491,20 @@ def main() -> int:
                 kpts_3d = flat[:K*3].reshape(K, 3)
                 kpt_conf = flat[K*3:K*3 + K]
                 kpts_2d = flat[K*3 + K:].reshape(K, 2)
-                publish_valid = tick.result.valid
+
+                # SAFETY: HARD LIMIT decision must be made just before SHM write.
+                # true_e2e_ms (GPU done) + post-GPU D2H + CPU packing has already
+                # elapsed; this is the latest budget check before C++ sees the data.
+                # Bug found via codex review: previously frame_exceeds_budget was
+                # computed but never applied to publish_valid → over-budget frames
+                # reached AK60 with valid=True. NEVER let that happen.
+                pre_publish_e2e_ms = (time.time_ns() - tick.ts_ns) / 1e6
+                publish_exceeds_budget = pre_publish_e2e_ms > LATENCY_HARD_LIMIT_MS
+                publish_valid = (
+                    tick.result.valid
+                    and not in_warmup
+                    and not publish_exceeds_budget
+                )
                 publisher.publish(
                     frame_id=tick.frame_id,
                     ts_ns=tick.ts_ns,
@@ -480,6 +516,12 @@ def main() -> int:
                     depth_invalid_ratio=tick.result.depth_invalid_ratio,
                     world_frame_applied=tick.world_frame_applied,
                 )
+                # actual control-visible latency: from camera exposure to
+                # SHM publish complete. Only collect post-warmup so stats
+                # match the other latency lists.
+                if not in_warmup:
+                    actual_publish_ms = (time.time_ns() - tick.ts_ns) / 1e6
+                    actual_publish_list.append(actual_publish_ms)
                 watchdog.note_publish()
     finally:
         # Shutdown ordering matters: drain streams BEFORE destroying the
@@ -527,9 +569,11 @@ def main() -> int:
         pct_over_hard = pct_over_soft = 0.0
         max_ms = float("nan")
 
+    skip_total = frame_skip_count + ticks
+    skip_ratio = (frame_skip_count / skip_total * 100) if skip_total else 0.0
     LOGGER.info(
-        "done: %d ticks / %.1fs → %.1f Hz  (stats on %d post-warmup frames)",
-        ticks, dt, fps, measured_n,
+        "done: %d ticks / %.1fs → %.1f Hz  (skip=%d, %.1f%% of polls; stats on %d post-warmup frames)",
+        ticks, dt, fps, frame_skip_count, skip_ratio, measured_n,
     )
     LOGGER.info(
         "e2e (gpu only) p50/95/99 = %.2f/%.2f/%.2f ms  max=%.2f ms",
@@ -550,6 +594,23 @@ def main() -> int:
             "HARD LIMIT %.0f ms (true_e2e basis): %d / %d frames violated (%.3f%%) — published as valid=False",
             LATENCY_HARD_LIMIT_MS, n_over_hard_true, tr_arr.size, pct_over_hard_true,
         )
+        # actual SHM-publish latency (control-visible). Difference vs true_e2e_ms
+        # = D2H batch + SHM seqlock write. Tells us whether HARD_LIMIT decided
+        # at GPU-done is actually safe (small diff) or optimistic (large diff).
+        if actual_publish_list:
+            ap = np.asarray(actual_publish_list)
+            ap_p50, ap_p95, ap_p99 = np.percentile(ap, [50, 95, 99])
+            ap_max = float(ap.max())
+            n_over_hard_pub = int((ap > LATENCY_HARD_LIMIT_MS).sum())
+            pct_over_hard_pub = n_over_hard_pub / ap.size * 100
+            LOGGER.info(
+                "actual_publish (cam→shm) p50/95/99 = %.2f/%.2f/%.2f ms  max=%.2f ms",
+                ap_p50, ap_p95, ap_p99, ap_max,
+            )
+            LOGGER.info(
+                "actual_publish > %.0f ms: %d / %d frames (%.3f%%) — TRUE control-visible violations",
+                LATENCY_HARD_LIMIT_MS, n_over_hard_pub, ap.size, pct_over_hard_pub,
+            )
         # Decomposition summary — where does true_e2e_ms time go?
         if bridge_proc_list and queue_wait_list and pipeline_proc_list:
             bp = np.asarray(bridge_proc_list)

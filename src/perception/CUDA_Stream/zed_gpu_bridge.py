@@ -169,6 +169,11 @@ class ZEDGpuBridge:
         self._stop_event = threading.Event()
         self._capture_thread: Optional[threading.Thread] = None
         self._frame_id = 0
+        # consume-once tracking: latest() returns each frame_id exactly once.
+        # Without this, a stalled bridge causes pipeline to reprocess the same
+        # frame, inflating true_e2e_ms with stale-reuse latency (codex finding,
+        # 2026-05-04). 0 sentinel matches frame_id == 1 first-frame condition.
+        self._last_returned_id = 0
         self._zed: Optional[Any] = None
         self._calibration: Dict[str, float] = {}
         self._using_webcam = False
@@ -558,11 +563,24 @@ class ZEDGpuBridge:
     # Consumer API
     # ------------------------------------------------------------------
     def latest(self, timeout: float = 1.0) -> Optional[ZEDFrame]:
+        """Return the latest UNCONSUMED frame, or None if no new frame arrives in timeout.
+
+        Each frame is returned at most once. Consecutive calls return None
+        until the bridge produces a new frame. This prevents the pipeline
+        from reprocessing the same frame, which had been silently inflating
+        true_e2e_ms with stale-reuse latency.
+
+        With deque(maxlen=2), the bridge may evict frames between pickups
+        (intentional — we always serve the freshest available).
+        """
         t_end = time.monotonic() + timeout
         while time.monotonic() < t_end:
             with self._frames_lock:
                 if self._frames:
-                    return self._frames[-1]
+                    frame = self._frames[-1]
+                    if frame.frame_id != self._last_returned_id:
+                        self._last_returned_id = frame.frame_id
+                        return frame
             time.sleep(0.001)
         return None
 
