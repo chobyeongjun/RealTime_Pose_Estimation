@@ -61,6 +61,7 @@ Safety      : C++ watchdog 0.2s → pretension 5N fallback
 | jetson_clocks 미적용 실행 | GPU 306MHz로 fall-back |
 | `trt_pose_engine_zerocopy.py` (v1) | 단일 stream — Track B의 4-stream으로 대체됨 |
 | TRT INT8 quantization (YOLO26s-lower6) | YOLO26s에서 INT8이 제대로 동작하지 않음 + keypoint 정확도 손실 허용 불가 |
+| Depth decimation / depth skip | 모든 프레임에 3D pose 필요. depth 빠지면 그 프레임 무효 → 제어 루프 stale data |
 
 ## 구조
 
