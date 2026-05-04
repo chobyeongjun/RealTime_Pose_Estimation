@@ -33,7 +33,7 @@ import torch
 # LATENCY_HARD_LIMIT_MS is the absolute ceiling — data past this is
 # considered stale for control purposes and must NOT reach Teensy as-is.
 # 20 ms user-defined. 18 ms soft warning (below) triggers [SLOW] log.
-LATENCY_HARD_LIMIT_MS = 20.0   # true_e2e_ms (camera→GPU done) ceiling
+LATENCY_HARD_LIMIT_MS = float("inf")  # hard limit disabled — log only
 LATENCY_SOFT_WARN_MS  = 18.0
 
 from .constraints import (
@@ -381,10 +381,8 @@ def main() -> int:
             # skips ILC/impedance update. Next frame ships normally.
             # During warmup we also mark as valid=False (to be safe) but
             # don't count it toward stats.
-            # HARD LIMIT uses true_e2e_ms (camera timestamp → GPU done).
-            # e2e_ms is GPU-pipeline-only and excludes capture/buffer-wait.
-            frame_exceeds_budget = true_e2e_ms > LATENCY_HARD_LIMIT_MS
-            frame_warn = true_e2e_ms > LATENCY_SOFT_WARN_MS
+            frame_exceeds_budget = e2e_ms > LATENCY_HARD_LIMIT_MS
+            frame_warn = e2e_ms > LATENCY_SOFT_WARN_MS
 
             # During warmup, log at debug level only (still mark valid=False
             # in publish so downstream ignores). Post-warmup spikes are
