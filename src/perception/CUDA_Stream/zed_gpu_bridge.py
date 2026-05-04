@@ -118,6 +118,13 @@ class ZEDFrame:
     gravity-aligned world frame. This mirrors mainline Method B
     (``ZEDIMUWorldFrame._R``) but keeps the IMU retrieve to the warmup
     phase only (skip_imu=True), saving ~1 ms per frame.
+
+    Timing fields (all in same domain as ``ts_ns`` — epoch nanoseconds):
+      * ``ts_ns``           — ZED hardware capture time (sensor exposure)
+      * ``bridge_start_ns`` — bridge thread began processing (just after grab)
+      * ``ready_ns``        — bridge finished H2D launch + put in queue
+    These let pipeline decompose true_e2e_ms into bridge / queue_wait /
+    pipeline portions for diagnostic visibility.
     """
 
     rgb_gpu: torch.Tensor  # (H, W, 3) uint8 on CUDA
@@ -127,6 +134,8 @@ class ZEDFrame:
     calibration: Dict[str, Any] = field(default_factory=dict)
     ready_event: Optional["torch.cuda.Event"] = None
     capture_ms: Dict[str, float] = field(default_factory=dict)  # per-step CPU timings
+    bridge_start_ns: int = 0   # set by bridge in _grab_one — diagnostics
+    ready_ns: int = 0          # set by bridge in _grab_one — diagnostics
 
 
 class ZEDGpuBridge:
@@ -407,9 +416,14 @@ class ZEDGpuBridge:
             return None
         cap["grab_ms"] = (time.perf_counter() - t0) * 1e3
 
+        # ts_ns and bridge_start_ns are both epoch-ns (same domain as time.time_ns()).
+        # ts_ns = sensor exposure time (ZED hardware), bridge_start_ns = right after
+        # grab() returned. Their difference is ZED SDK's internal latency from
+        # exposure to grab completion (typically 1-3 ms on Orin NX).
         ts_ns = int(
             self._zed.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_nanoseconds()
         )
+        bridge_start_ns = time.time_ns()
 
         t0 = time.perf_counter()
         self._zed.retrieve_image(self._image_mat, sl.VIEW.LEFT)
@@ -439,6 +453,11 @@ class ZEDGpuBridge:
 
         rgb_gpu, depth_gpu, ready_event = self._upload(rgb_pinned, depth_pinned)
 
+        # ready_ns = right after H2D was LAUNCHED (cudaMemcpyAsync queued + event
+        # recorded). The actual GPU completion is signalled by ready_event; CPU
+        # timestamp here is what's available without sync-blocking the bridge.
+        ready_ns = time.time_ns()
+
         self._frame_id += 1
         return ZEDFrame(
             rgb_gpu=rgb_gpu,
@@ -448,6 +467,8 @@ class ZEDGpuBridge:
             calibration=dict(self._calibration),  # snapshot copy — not a reference
             ready_event=ready_event,
             capture_ms=cap,
+            bridge_start_ns=bridge_start_ns,
+            ready_ns=ready_ns,
         )
 
     # ------------------------------------------------------------------

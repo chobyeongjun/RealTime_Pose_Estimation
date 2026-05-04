@@ -314,6 +314,14 @@ def main() -> int:
     warmup_ticks_skipped = 0
     latencies: list[float] = []
     true_e2e_list: list[float] = []
+    # Decomposition stats — for diagnosing where true_e2e_ms time goes:
+    #   bridge_proc:    bridge thread CPU work per frame
+    #   queue_wait:     time spent in queue between bridge ready and pipeline pickup
+    #   pipeline_proc:  pipeline pickup → GPU done
+    # Sum ≈ true_e2e_ms (minor diff = ZED HW capture → grab return latency).
+    bridge_proc_list: list[float] = []
+    queue_wait_list: list[float] = []
+    pipeline_proc_list: list[float] = []
     _last_stats_t = time.monotonic()
     STATS_INTERVAL_S = 10.0   # print rolling stats every 10s
     try:
@@ -326,6 +334,11 @@ def main() -> int:
             ticks += 1
             e2e_ms = tick.latency_ms["e2e"]
             true_e2e_ms = tick.latency_ms.get("true_e2e_ms", float("nan"))
+            # Decomposition keys (added by pipeline.py for diagnostic visibility)
+            zed_lag_ms = tick.latency_ms.get("zed_lag_ms", float("nan"))
+            bridge_proc_ms = tick.latency_ms.get("bridge_proc_ms", float("nan"))
+            queue_wait_ms = tick.latency_ms.get("queue_wait_ms", float("nan"))
+            pipeline_proc_ms = tick.latency_ms.get("pipeline_proc_ms", float("nan"))
 
             # Skip first N real-pipeline frames from stats (warmup).
             # They still publish normally so downstream control isn't
@@ -335,6 +348,9 @@ def main() -> int:
                 latencies.append(e2e_ms)
                 if not np.isnan(true_e2e_ms):
                     true_e2e_list.append(true_e2e_ms)
+                bridge_proc_list.append(bridge_proc_ms)
+                queue_wait_list.append(queue_wait_ms)
+                pipeline_proc_list.append(pipeline_proc_ms)
             else:
                 warmup_ticks_skipped = ticks  # keep latest for log
 
@@ -358,20 +374,39 @@ def main() -> int:
                     int((arr >= 20).sum()),
                 ]
                 pct = [f"{x/n_total*100:.0f}%" for x in b]
+                # true_e2e_ms decomposition stats
+                def _pct_arr(lst, q):
+                    return float(np.percentile(np.asarray(lst), q)) if lst else float("nan")
+                tr_p50 = _pct_arr(true_e2e_list, 50)
+                tr_p99 = _pct_arr(true_e2e_list, 99)
+                tr_max = max(true_e2e_list) if true_e2e_list else float("nan")
+                br_p50, br_p99 = _pct_arr(bridge_proc_list, 50), _pct_arr(bridge_proc_list, 99)
+                qw_p50, qw_p99 = _pct_arr(queue_wait_list, 50), _pct_arr(queue_wait_list, 99)
+                pl_p50, pl_p99 = _pct_arr(pipeline_proc_list, 50), _pct_arr(pipeline_proc_list, 99)
+                # HARD LIMIT violation rate based on true_e2e_ms (the metric we publish on)
+                tr_arr = np.asarray(true_e2e_list) if true_e2e_list else np.array([])
+                n_over_true = int((tr_arr > LATENCY_HARD_LIMIT_MS).sum()) if tr_arr.size else 0
+                pct_over_true = (n_over_true / tr_arr.size * 100) if tr_arr.size else 0.0
+
                 LOGGER.info(
-                    "[STATS t=%ds] frames=%d fps=%.1f  STALE=%d(%.2f%%)",
-                    int(elapsed), n_total, fps_live, n_over, n_over / n_total * 100,
+                    "[STATS t=%ds] frames=%d fps=%.1f  HARD(true_e2e>%dms)=%d(%.2f%%)",
+                    int(elapsed), n_total, fps_live,
+                    int(LATENCY_HARD_LIMIT_MS), n_over_true, pct_over_true,
                 )
                 LOGGER.info(
-                    "  e2e:      min=%.1f  p50=%.1f  p95=%.1f  p99=%.1f  max=%.1f ms",
+                    "  e2e (gpu only):  min=%.1f  p50=%.1f  p95=%.1f  p99=%.1f  max=%.1f ms",
                     mn, p50, p95, p99, mx,
                 )
                 LOGGER.info(
-                    "  true_e2e: p99=%.1f ms",
-                    true_p99,
+                    "  true_e2e (cam→gpu_done): p50=%.1f  p99=%.1f  max=%.1f ms",
+                    tr_p50, tr_p99, tr_max,
                 )
                 LOGGER.info(
-                    "  dist: <10ms=%s | 10-14ms=%s | 14-18ms=%s | 18-20ms=%s | >=20ms=%s",
+                    "  decomp p50/p99: bridge_proc=%.1f/%.1f  queue_wait=%.1f/%.1f  pipeline_proc=%.1f/%.1f ms",
+                    br_p50, br_p99, qw_p50, qw_p99, pl_p50, pl_p99,
+                )
+                LOGGER.info(
+                    "  e2e dist: <10=%s | 10-14=%s | 14-18=%s | 18-20=%s | >=20=%s",
                     *pct,
                 )
 
@@ -392,11 +427,13 @@ def main() -> int:
             if frame_warn and not in_warmup:
                 lms = tick.latency_ms
                 LOGGER.warning(
-                    "[SLOW] frame %d  e2e=%.1f ms\n"
+                    "[SLOW] frame %d  true_e2e=%.1f ms (e2e=%.1f)\n"
+                    "  decomp: bridge_proc=%.1f  queue_wait=%.1f  pipeline_proc=%.1f  zed_lag=%.1f ms\n"
                     "  capture : grab=%.1f  ret_rgb=%.1f  getdata_rgb=%.1f"
                     "  pinned_rgb=%.1f  ret_depth=%.1f  getdata_depth=%.1f\n"
-                    "  pipeline: pre=%.1f  inf=%.1f  post=%.1f",
-                    tick.frame_id, e2e_ms,
+                    "  pipeline: pre=%.1f  inf=%.1f  post=%.1f  constraint=%.1f",
+                    tick.frame_id, true_e2e_ms, e2e_ms,
+                    bridge_proc_ms, queue_wait_ms, pipeline_proc_ms, zed_lag_ms,
                     lms.get("grab_ms", float("nan")),
                     lms.get("retrieve_rgb_ms", float("nan")),
                     lms.get("getdata_rgb_ms", float("nan")),
@@ -406,6 +443,7 @@ def main() -> int:
                     lms.get("pre_ms", float("nan")),
                     lms.get("inf_ms", float("nan")),
                     lms.get("post_ms", float("nan")),
+                    lms.get("constraint_ms", float("nan")),
                 )
             elif in_warmup and frame_exceeds_budget:
                 LOGGER.debug(
@@ -469,6 +507,8 @@ def main() -> int:
         lat_arr = np.asarray(latencies)
         p50, p95, p99 = np.percentile(lat_arr, [50, 95, 99])
     else:
+        # Early exit (Ctrl+C during warmup) — avoid UnboundLocalError on lat_arr below
+        lat_arr = np.array([])
         p50 = p95 = p99 = float("nan")
 
     # Hard-limit compliance (20 ms user requirement).
@@ -492,11 +532,45 @@ def main() -> int:
         ticks, dt, fps, measured_n,
     )
     LOGGER.info(
-        "e2e p50/95/99 = %.2f/%.2f/%.2f ms  max=%.2f ms",
+        "e2e (gpu only) p50/95/99 = %.2f/%.2f/%.2f ms  max=%.2f ms",
         p50, p95, p99, max_ms,
     )
+    # true_e2e_ms HARD LIMIT compliance (the metric that actually defines safety)
+    if true_e2e_list:
+        tr_arr = np.asarray(true_e2e_list)
+        tr_p50, tr_p95, tr_p99 = np.percentile(tr_arr, [50, 95, 99])
+        tr_max = float(tr_arr.max())
+        n_over_hard_true = int((tr_arr > LATENCY_HARD_LIMIT_MS).sum())
+        pct_over_hard_true = n_over_hard_true / tr_arr.size * 100
+        LOGGER.info(
+            "true_e2e (cam→gpu_done) p50/95/99 = %.2f/%.2f/%.2f ms  max=%.2f ms",
+            tr_p50, tr_p95, tr_p99, tr_max,
+        )
+        LOGGER.info(
+            "HARD LIMIT %.0f ms (true_e2e basis): %d / %d frames violated (%.3f%%) — published as valid=False",
+            LATENCY_HARD_LIMIT_MS, n_over_hard_true, tr_arr.size, pct_over_hard_true,
+        )
+        # Decomposition summary — where does true_e2e_ms time go?
+        if bridge_proc_list and queue_wait_list and pipeline_proc_list:
+            bp = np.asarray(bridge_proc_list)
+            qw = np.asarray(queue_wait_list)
+            pp = np.asarray(pipeline_proc_list)
+            LOGGER.info(
+                "decomposition p50/p99: bridge_proc=%.1f/%.1f  queue_wait=%.1f/%.1f  pipeline_proc=%.1f/%.1f ms",
+                np.percentile(bp, 50), np.percentile(bp, 99),
+                np.percentile(qw, 50), np.percentile(qw, 99),
+                np.percentile(pp, 50), np.percentile(pp, 99),
+            )
+            LOGGER.info(
+                "decomposition mean (sum check): bridge=%.1f + queue=%.1f + pipeline=%.1f = %.1f ms (true_e2e mean=%.1f)",
+                bp.mean(), qw.mean(), pp.mean(),
+                bp.mean() + qw.mean() + pp.mean(),
+                tr_arr.mean(),
+            )
+    else:
+        LOGGER.warning("true_e2e_list empty — old bridge/pipeline (no decomposition)")
     LOGGER.info(
-        "HARD LIMIT %.0f ms: %d / %d frames exceeded (%.3f%%) — published as valid=False",
+        "HARD LIMIT %.0f ms (e2e basis, GPU-only — informational): %d / %d frames exceeded (%.3f%%)",
         LATENCY_HARD_LIMIT_MS, n_over_hard, measured_n, pct_over_hard,
     )
     LOGGER.info(

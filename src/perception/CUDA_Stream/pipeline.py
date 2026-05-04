@@ -237,6 +237,11 @@ class StreamedPosePipeline:
         if frame is None:
             return None
 
+        # pickup_ns: epoch-ns when pipeline received the frame from bridge.
+        # This is the boundary between "queue wait" (bridge ready → pipeline
+        # pickup) and "pipeline processing" (pickup → GPU done).
+        pickup_ns = time.time_ns()
+
         self._frame_count += 1
         cap = self.sm.bundle("capture")
         pre = self.sm.bundle("preproc")
@@ -325,6 +330,18 @@ class StreamedPosePipeline:
         )
         trace = self.tracer.end()
 
+        # ─── true_e2e_ms decomposition (diagnostic visibility) ─────────
+        # All four are in epoch-ns clock domain (same as frame.ts_ns).
+        #   zed_lag        = ZED hardware capture → bridge began processing
+        #   bridge_proc    = bridge thread CPU work (grab → H2D launched)
+        #   queue_wait     = bridge ready → pipeline pickup
+        #   pipeline_proc  = pipeline pickup → GPU work done
+        # Sum ≈ true_e2e_ms (any small residual = clock drift / measurement gap).
+        zed_lag_ms = (frame.bridge_start_ns - frame.ts_ns) / 1e6 if frame.bridge_start_ns else 0.0
+        bridge_proc_ms = (frame.ready_ns - frame.bridge_start_ns) / 1e6 if frame.bridge_start_ns and frame.ready_ns else 0.0
+        queue_wait_ms = (pickup_ns - frame.ready_ns) / 1e6 if frame.ready_ns else 0.0
+        pipeline_proc_ms = (t_gpu_done_ns - pickup_ns) / 1e6
+
         tick = PipelineTick(
             frame_id=frame.frame_id,
             ts_ns=frame.ts_ns,
@@ -334,6 +351,11 @@ class StreamedPosePipeline:
                 "e2e": (t_end - t_start) * 1e3,
                 "constraint_ms": constraint_ms,
                 "true_e2e_ms": (t_gpu_done_ns - frame.ts_ns) / 1e6,
+                # Decomposition — each stage of true_e2e_ms
+                "zed_lag_ms": zed_lag_ms,
+                "bridge_proc_ms": bridge_proc_ms,
+                "queue_wait_ms": queue_wait_ms,
+                "pipeline_proc_ms": pipeline_proc_ms,
                 **{f"{k}_ms": v for k, v in trace.stage_ms.items()},
                 **frame.capture_ms,  # grab_ms, retrieve_rgb_ms, getdata_rgb_ms, etc.
             },
