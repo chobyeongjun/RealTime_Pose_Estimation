@@ -375,11 +375,10 @@ def recommend_branch(
     _, c_bridge, _, _ = candidate.metric("bridge_proc_p99")
 
     if not _is_nan(c_zed) and c_zed > 25.0:
-        return (f"가설 H2 확정: zed_lag p99 mean={c_zed:.1f}ms ≫ ZED X Mini 정상 17-25ms. "
-                "→ ZED SDK 내부 buffer 적체. Codex Q4: T1/T2 분리는 1-3ms gain만, "
-                "ZED CUDA interop이 본질적 해법. "
-                "권장 순서: (1) bridge-only 실험 — pipeline 떼고 grab+ts만 측정해 "
-                "'pure ZED latency' 분리, (2) 결과에 따라 Phase D (CUDA interop) 직진.")
+        return (f"zed_lag p99 mean={c_zed:.1f}ms 큼. raw SDK baseline 미측정 상태에서 "
+                "이 값이 SDK 한계인지 우리 bridge 적체인지 구분 불가. "
+                "권장: bridge-only 실험 (pipeline 떼고 grab+ts만 측정) → raw SDK latency 확정 → "
+                "그 baseline 위에서 우리 시스템이 추가한 lag만 격리.")
 
     if not _is_nan(c_pipe) and c_pipe > 18.0:
         return (f"pipeline_proc p99 mean={c_pipe:.1f}ms 우세. "
