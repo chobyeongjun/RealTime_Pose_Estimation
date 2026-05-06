@@ -45,7 +45,14 @@ from .gpu_postprocess import GpuPostprocessor
 from .gpu_preprocess import GpuPreprocessor
 from .keypoint_config import get_schema
 from .pipeline import StreamedPosePipeline
-from .shm_publisher import DEFAULT_NAME, ShmPublisher
+from .shm_publisher import (
+    DEFAULT_NAME,
+    INVALID_BUDGET_EXCEED,
+    INVALID_UNKNOWN,
+    INVALID_WARMUP,
+    ShmPublisher,
+    VALID_OK,
+)
 from .stream_manager import StreamManager
 from .tracer import PipelineTracer
 from .trt_runner import TRTRunner, warmup
@@ -505,6 +512,23 @@ def main() -> int:
                     and not in_warmup
                     and not publish_exceeds_budget
                 )
+
+                # P1 (2026-05-06): valid_reason classification.
+                # Order matters — warmup is the most common reason early on, then
+                # budget exceed, then post-stage / constraint rejection. Without a
+                # PoseResult.reason field we can only classify the gates we own
+                # here; pure post-stage rejections (low-conf detection, occluded
+                # joints, constraint reject) collapse to INVALID_UNKNOWN until a
+                # follow-up patch threads the reason through.
+                if publish_valid:
+                    valid_reason = VALID_OK
+                elif in_warmup:
+                    valid_reason = INVALID_WARMUP
+                elif publish_exceeds_budget:
+                    valid_reason = INVALID_BUDGET_EXCEED
+                else:
+                    valid_reason = INVALID_UNKNOWN
+
                 publisher.publish(
                     frame_id=tick.frame_id,
                     ts_ns=tick.ts_ns,
@@ -515,6 +539,7 @@ def main() -> int:
                     valid=publish_valid,
                     depth_invalid_ratio=tick.result.depth_invalid_ratio,
                     world_frame_applied=tick.world_frame_applied,
+                    valid_reason=valid_reason,
                 )
                 # actual control-visible latency: from camera exposure to
                 # SHM publish complete. Only collect post-warmup so stats

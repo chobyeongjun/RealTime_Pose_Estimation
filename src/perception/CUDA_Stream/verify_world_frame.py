@@ -62,7 +62,8 @@ def run(n_frames: int = 150) -> bool:
             time.sleep(0.005)
             continue
 
-        frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d, box_conf, valid, depth_inv, world_flag = data
+        # P1: ShmReader returns 12-tuple; this verifier only uses the original 9.
+        frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d, box_conf, valid, depth_inv, world_flag = data[:9]
         read_count += 1
 
         if not valid:

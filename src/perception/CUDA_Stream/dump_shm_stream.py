@@ -114,6 +114,9 @@ class DumpReader:
             self.idx = 0
         i = self.idx
         self.idx += 1
+        # P1 (2026-05-06): 12-tuple to match live ShmReader. The npz files
+        # don't have publish_done_mono_ns / valid_reason / ts_domain (they
+        # were written before P1), so default to 0/UNKNOWN/EPOCH.
         return (
             int(self.frame_id[i]),
             int(self.ts_ns[i]),
@@ -124,6 +127,9 @@ class DumpReader:
             bool(self.valid[i]),
             float(self.depth_inv_ratio[i]),
             bool(self.world_frame_applied[i]),
+            0,    # publish_done_mono_ns — not recorded in older dumps
+            0,    # valid_reason = VALID_OK (best-effort default)
+            0,    # ts_domain = epoch
         )
 
     def close(self) -> None:
@@ -195,7 +201,10 @@ def main() -> int:
             if data is None:
                 time.sleep(0.001)
                 continue
-            frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d, box_conf, valid, depth_inv, world_frame_applied = data
+            # P1: ShmReader returns 12-tuple now; this dumper only needs the
+            # first 9 fields (publish_done/valid_reason/ts_domain are not
+            # archived in the .npz format yet).
+            frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d, box_conf, valid, depth_inv, world_frame_applied = data[:9]
             if frame_id == last_frame_id:
                 dup_skipped += 1
                 time.sleep(0.001)

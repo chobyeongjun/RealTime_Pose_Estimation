@@ -374,7 +374,8 @@ def main() -> int:
             cur_valid = False
             cur_frame_id = -1
             if data is not None:
-                cur_frame_id, _ts, kpts_3d, kpt_conf, _kpts_2d, box_conf, valid, dir_, world_frame_applied = data
+                # P1: ShmReader returns 12-tuple; viewer only uses the original 9.
+                cur_frame_id, _ts, kpts_3d, kpt_conf, _kpts_2d, box_conf, valid, dir_, world_frame_applied = data[:9]
                 # Geometric sanity gate — catches YOLO failure modes (self-occlusion,
                 # L/R swap, treadmill-belt confusion) that produce impossible poses
                 # while still reporting valid=True. Gate is read-only; rejected
