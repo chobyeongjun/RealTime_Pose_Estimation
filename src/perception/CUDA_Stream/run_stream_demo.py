@@ -123,6 +123,23 @@ def parse_args() -> argparse.Namespace:
              "bridge thread만 동작. 우리 코드 경로의 bridge cycle 격리. "
              "Pipeline 영향 0인 상태에서 bridge_proc/grab/retrieve 분포 측정.",
     )
+    # Plan v7 (2026-05-07) — zed_lag 21ms 진단/격파 levers
+    ap.add_argument(
+        "--exposure-us", type=int, default=None,
+        help="Plan v7 Round 1 — ZED exposure MANUAL microseconds. "
+             "None=AUTO (default). 5000-12000 권장 (밝은 실내~어두움).",
+    )
+    ap.add_argument(
+        "--sensing-mode", default="STANDARD",
+        choices=["STANDARD", "FILL"],
+        help="Plan v7 Round 3 — ZED depth sensing mode. STANDARD (default) = "
+             "valid pixels only, FILL = hole filling (더 무거움).",
+    )
+    ap.add_argument(
+        "--diag-zed-lag", action="store_true",
+        help="Plan v7 Round 0 — warmup 첫 5 frames 의 ZED 다층 timestamp "
+             "(IMAGE/CURRENT/bridge) 출력. zed_lag 21ms 격리.",
+    )
     ap.add_argument(
         "--lpost-ablation", action="store_true",
         help="L_post Phase 0 ablation — post 안 .cpu() 제거 + sticky/EMA/"
@@ -285,6 +302,9 @@ def main() -> int:
         world_frame=not args.no_world_frame,
         manual_pitch_deg=args.camera_pitch_deg,
         collect_cycle_stats=args.idle_pipeline,   # A11
+        exposure_us=args.exposure_us,             # Plan v7 R1
+        sensing_mode=args.sensing_mode,           # Plan v7 R3
+        diag_zed_lag=args.diag_zed_lag,           # Plan v7 R0
     )
     bridge.open()
     bridge.start()

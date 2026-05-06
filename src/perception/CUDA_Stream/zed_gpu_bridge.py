@@ -154,6 +154,10 @@ class ZEDGpuBridge:
         imu_warmup_frames: int = 20,    # gravity vector average window
         manual_pitch_deg: Optional[float] = None,  # override IMU with pitch angle
         collect_cycle_stats: bool = False,  # A11 (2026-05-06) — opt-in cycle history
+        # Plan v7 (2026-05-07) — zed_lag 21ms 진단 levers
+        exposure_us: Optional[int] = None,  # None=AUTO, 양수=MANUAL microseconds
+        sensing_mode: str = "STANDARD",     # STANDARD | FILL
+        diag_zed_lag: bool = False,         # warmup 5 frames timestamp 다층 print
     ) -> None:
         self.device = device or torch.device("cuda:0")
         self.resolution = resolution
@@ -164,6 +168,9 @@ class ZEDGpuBridge:
         self.world_frame = world_frame
         self.imu_warmup_frames = imu_warmup_frames
         self.manual_pitch_deg = manual_pitch_deg
+        self.exposure_us = exposure_us
+        self.sensing_mode = sensing_mode.upper()
+        self.diag_zed_lag = diag_zed_lag
 
         self._frames: Deque[ZEDFrame] = deque(maxlen=queue_size)
         self._frames_lock = threading.Lock()
@@ -245,6 +252,35 @@ class ZEDGpuBridge:
         status = self._zed.open(init)
         if status != sl.ERROR_CODE.SUCCESS:
             raise RuntimeError(f"ZED open failed: {status}")
+
+        # Plan v7 — exposure mode override
+        # 검증된 사실 (Stereolabs Camera Controls doc, 2026-05-06):
+        #   ZED 2/2i/Mini (구형): VIDEO_SETTINGS.EXPOSURE = 0..100 percentage of framerate (-1 = AUTO)
+        #   ZED X / X Mini (GMSL): VIDEO_SETTINGS.EXPOSURE_TIME = microseconds (1024..66000 default range)
+        # 우리는 ZED X Mini → EXPOSURE_TIME path 가 정확. 단 SDK 버전에 따라
+        # enum 미존재 가능성 있어 hasattr 으로 안전하게 시도.
+        if self.exposure_us is not None:
+            exposure_time_enum = getattr(sl.VIDEO_SETTINGS, "EXPOSURE_TIME", None)
+            applied_path = None
+            if exposure_time_enum is not None:
+                try:
+                    self._zed.set_camera_settings(exposure_time_enum, self.exposure_us)
+                    applied_path = f"EXPOSURE_TIME={self.exposure_us}us (ZED X family)"
+                except Exception as err:
+                    LOGGER.warning("EXPOSURE_TIME set failed: %s — fall back to percentage", err)
+            if applied_path is None:
+                # Fallback for ZED 2/Mini: EXPOSURE (0-100 percentage of frame interval)
+                frame_us = int(1_000_000 / self.fps)
+                pct = max(0, min(100, int(100 * self.exposure_us / frame_us)))
+                try:
+                    self._zed.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, pct)
+                    applied_path = f"EXPOSURE={pct}% (ZED 2/Mini, ≈{self.exposure_us}us / frame={frame_us}us)"
+                except Exception as err:
+                    LOGGER.error("ZED exposure set failed BOTH APIs: %s", err)
+                    applied_path = f"FAILED ({err})"
+            LOGGER.info("ZED exposure → MANUAL via %s", applied_path)
+        else:
+            LOGGER.info("ZED exposure → AUTO (default)")
 
         cam_info = self._zed.get_camera_information().camera_configuration
         fx = cam_info.calibration_parameters.left_cam.fx
@@ -431,6 +467,32 @@ class ZEDGpuBridge:
             return self._grab_webcam()
         assert self._zed is not None and sl is not None
         rt = sl.RuntimeParameters()
+        # Plan v7 — sensing_mode 적용.
+        # 검증된 사실 (4.0 Migration Guide + RuntimeParameters API doc):
+        #   SDK 4.0+: RuntimeParameters.enable_fill_mode (bool, default False)
+        #   SDK 3.x : RuntimeParameters.sensing_mode = SENSING_MODE.{STANDARD,FILL}
+        #   SDK 4.0 에서 SENSING_MODE enum 자체 제거됨.
+        # → enable_fill_mode 먼저 시도 (4.0+ 정확), 실패 시 SDK 3.x fallback.
+        if not getattr(self, "_sensing_path_logged", False):
+            self._sensing_path_logged = True
+            self._sensing_path = "unset"
+        try:
+            rt.enable_fill_mode = (self.sensing_mode == "FILL")
+            if self._sensing_path == "unset":
+                self._sensing_path = f"enable_fill_mode={rt.enable_fill_mode} (SDK 4.0+)"
+                LOGGER.info("ZED sensing → %s", self._sensing_path)
+        except AttributeError:
+            try:
+                sensing_enum = getattr(sl, "SENSING_MODE", None)
+                if sensing_enum is not None:
+                    rt.sensing_mode = getattr(sensing_enum, self.sensing_mode)
+                    if self._sensing_path == "unset":
+                        self._sensing_path = f"SENSING_MODE.{self.sensing_mode} (SDK 3.x)"
+                        LOGGER.info("ZED sensing → %s", self._sensing_path)
+            except Exception as err:
+                if self._sensing_path == "unset":
+                    self._sensing_path = f"FAILED ({err})"
+                    LOGGER.warning("ZED sensing path failed: %s", err)
         cap = {}
 
         t0 = time.perf_counter()
@@ -441,11 +503,47 @@ class ZEDGpuBridge:
         # ts_ns and bridge_start_ns are both epoch-ns (same domain as time.time_ns()).
         # ts_ns = sensor exposure time (ZED hardware), bridge_start_ns = right after
         # grab() returned. Their difference is ZED SDK's internal latency from
-        # exposure to grab completion (typically 1-3 ms on Orin NX).
+        # exposure to grab completion (typically 1-3 ms on Orin NX per SDK doc;
+        # ⚠️  우리 측정 21ms — Plan v7 진단 대상).
         ts_ns = int(
             self._zed.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_nanoseconds()
         )
         bridge_start_ns = time.time_ns()
+
+        # Plan v7 — Round 0 진단 (warmup 5 frames). 다층 timestamp 비교로
+        # zed_lag 21ms 의 의미 격리.
+        # 검증된 정의 (Stereolabs forum, ZED X timestamps thread):
+        #   TIME_REFERENCE.IMAGE   = "time the image is received at the host
+        #                            (~us = exposure end)"
+        #   TIME_REFERENCE.CURRENT = "current SDK call time"
+        # 즉 (current - image) = SDK 가 이 grab() 처리에 *지금까지* 사용한 시간.
+        #     (bridge - image) = exposure end → time.time_ns() 까지 호스트 시간.
+        # 두 값이 같은 epoch (UNIX ns) 라면 일관. 다르면 sanity warning.
+        if self.diag_zed_lag and self._frame_id < 5:
+            try:
+                ts_current_ns = int(
+                    self._zed.get_timestamp(sl.TIME_REFERENCE.CURRENT).get_nanoseconds()
+                )
+                image_to_current_ms = (ts_current_ns - ts_ns) / 1e6
+                image_to_bridge_ms = (bridge_start_ns - ts_ns) / 1e6
+                current_to_bridge_ms = (bridge_start_ns - ts_current_ns) / 1e6
+
+                # Epoch sanity — 두 timestamp 가 같은 UNIX epoch 인가
+                epoch_warn = ""
+                if abs(image_to_bridge_ms) > 10_000 or image_to_bridge_ms < 0:
+                    epoch_warn = " ⚠️ EPOCH MISMATCH (image_to_bridge 비현실적)"
+
+                LOGGER.info(
+                    "[zed_ts] frame=%d image=%d current=%d bridge=%d  "
+                    "image_to_current=%.2fms image_to_bridge=%.2fms "
+                    "current_to_bridge=%.2fms grab_ms=%.2f%s",
+                    self._frame_id,
+                    ts_ns, ts_current_ns, bridge_start_ns,
+                    image_to_current_ms, image_to_bridge_ms,
+                    current_to_bridge_ms, cap["grab_ms"], epoch_warn,
+                )
+            except Exception as err:
+                LOGGER.warning("[zed_ts] diag failed: %s", err)
 
         t0 = time.perf_counter()
         self._zed.retrieve_image(self._image_mat, sl.VIEW.LEFT)

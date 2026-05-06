@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Plan v7 — zed_lag 측정 자동 sweep
+#
+# Round 1 (exposure) 또는 Round 2 (depth_mode) 의 여러 케이스 자동 실행 +
+# 결과 한 번에 비교. 각 case 마다 launch_clean.sh 20s.
+#
+# 사용법:
+#   sudo bash scripts/zedlag_sweep.sh exposure   # Round 1 — AUTO/5/8/12ms
+#   sudo bash scripts/zedlag_sweep.sh depth      # Round 2 — PERFORMANCE/QUALITY/ULTRA
+#   sudo bash scripts/zedlag_sweep.sh sensing    # Round 3 — STANDARD/FILL
+#
+# 주의: TDD discipline 상 단계별 측정 후 결정이 정도. 본 sweep 은
+# *시간 절약* 용 — 각 round 의 4 case 를 손으로 안 돌리고 자동화.
+# 단계별 가려면 launch_clean.sh 직접 호출.
+
+set -e
+
+ROUND="${1:-exposure}"
+TS="$(date +%Y%m%d_%H%M%S)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUTDIR="/tmp/zedlag_sweep_${ROUND}_${TS}"
+mkdir -p "$OUTDIR"
+
+if [ "$EUID" -ne 0 ]; then
+    echo "ERROR: sudo 필요. Usage: sudo bash scripts/zedlag_sweep.sh {exposure|depth|sensing}"
+    exit 1
+fi
+
+echo "=== Plan v7 sweep: ${ROUND} ==="
+echo "  output dir : ${OUTDIR}"
+echo ""
+
+run_case() {
+    local label="$1"
+    shift
+    local extra="$*"
+    local logfile="${OUTDIR}/${label}.log"
+    echo "▶ Running case: ${label}  (extra: ${extra})"
+    bash "$ROOT/src/perception/CUDA_Stream/launch_clean.sh" 20 $extra \
+        2>&1 | tail -200 > "$logfile" || true
+    echo "  → ${logfile}"
+    echo ""
+}
+
+case "$ROUND" in
+    exposure)
+        run_case "auto"      ""
+        run_case "manual_5ms"  --exposure-us 5000
+        run_case "manual_8ms"  --exposure-us 8000
+        run_case "manual_12ms" --exposure-us 12000
+        ;;
+    depth)
+        run_case "performance" --depth-mode PERFORMANCE
+        run_case "quality"     --depth-mode QUALITY
+        run_case "ultra"       --depth-mode ULTRA
+        ;;
+    sensing)
+        run_case "standard" --sensing-mode STANDARD
+        run_case "fill"     --sensing-mode FILL
+        ;;
+    *)
+        echo "ERROR: unknown round '${ROUND}'. Use {exposure|depth|sensing}"
+        exit 1
+        ;;
+esac
+
+echo ""
+echo "=== Comparison table ==="
+LABELS=()
+FILES=()
+for f in "$OUTDIR"/*.log; do
+    LABELS+=("--label" "$(basename "$f" .log)")
+    FILES+=("$f")
+done
+
+python3 "$ROOT/scripts/parse_zedlag_results.py" "${LABELS[@]}" "${FILES[@]}"
+
+echo ""
+echo "Logs: ${OUTDIR}/"
