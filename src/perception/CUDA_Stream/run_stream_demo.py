@@ -117,6 +117,12 @@ def parse_args() -> argparse.Namespace:
              "publish는 valid=False로 통과. 결과 의미 없음 (zeros). "
              "full pipeline의 bridge_proc 26ms vs bridge-only 8.2ms 차이 격리.",
     )
+    ap.add_argument(
+        "--idle-pipeline", action="store_true",
+        help="A11 진단 — Pipeline thread (main thread) sleep만, "
+             "bridge thread만 동작. 우리 코드 경로의 bridge cycle 격리. "
+             "Pipeline 영향 0인 상태에서 bridge_proc/grab/retrieve 분포 측정.",
+    )
     return ap.parse_args()
 
 
@@ -258,9 +264,67 @@ def main() -> int:
         enable_depth=args.depth_mode != "NONE",
         world_frame=not args.no_world_frame,
         manual_pitch_deg=args.camera_pitch_deg,
+        collect_cycle_stats=args.idle_pipeline,   # A11
     )
     bridge.open()
     bridge.start()
+
+    # ───────────────────────────────────────────────────────────────────
+    # A11 idle-pipeline mode — main thread sleeps, bridge runs alone.
+    # Returns early before pipeline/publisher setup (those are unused).
+    # ───────────────────────────────────────────────────────────────────
+    if args.idle_pipeline:
+        LOGGER.info(
+            "=== A11 idle-pipeline mode — main thread sleeps for %.0fs, "
+            "bridge runs alone ===",
+            args.duration,
+        )
+        try:
+            time.sleep(args.duration)
+        finally:
+            bridge.stop()
+        stats = bridge.get_cycle_stats()
+        if not stats:
+            LOGGER.error("A11: no cycle stats collected")
+            return
+        n = len(stats)
+        first_ts = stats[0]["ts_ns"]
+        last_ts = stats[-1]["ts_ns"]
+        actual_dur = (last_ts - first_ts) / 1e9 if last_ts > first_ts else 0.0
+        hz = (n - 1) / actual_dur if actual_dur > 0 else 0.0
+        LOGGER.info(
+            "=== A11 results: %d frames in %.1fs (ts-based) = %.1f Hz ===",
+            n, actual_dur, hz,
+        )
+
+        def _pct(values, q):
+            return float(np.percentile(np.asarray(values), q))
+
+        for key in (
+            "grab_ms", "retrieve_rgb_ms", "getdata_rgb_ms", "pinned_rgb_ms",
+            "retrieve_depth_ms", "getdata_depth_ms", "bridge_proc_ms",
+        ):
+            vals = [s[key] for s in stats]
+            arr = np.asarray(vals)
+            LOGGER.info(
+                "  %-20s min=%5.2f p50=%5.2f p95=%5.2f p99=%5.2f max=%5.2f mean=%5.2f ms",
+                key,
+                float(arr.min()), _pct(vals, 50), _pct(vals, 95),
+                _pct(vals, 99), float(arr.max()), float(arr.mean()),
+            )
+        # delta_ts (frame interval, frame N → N+1)
+        if n >= 2:
+            delta = [(stats[i]["ts_ns"] - stats[i-1]["ts_ns"]) / 1e6 for i in range(1, n)]
+            arr = np.asarray(delta)
+            LOGGER.info(
+                "  %-20s min=%5.2f p50=%5.2f p95=%5.2f p99=%5.2f max=%5.2f mean=%5.2f ms",
+                "delta_ts_ms",
+                float(arr.min()), _pct(delta, 50), _pct(delta, 95),
+                _pct(delta, 99), float(arr.max()), float(arr.mean()),
+            )
+
+        LOGGER.info("A11 idle-pipeline done. Exiting.")
+        return
 
     tracer = PipelineTracer(
         enabled=bool(args.trace),

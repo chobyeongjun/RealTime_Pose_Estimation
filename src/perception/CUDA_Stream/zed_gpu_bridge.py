@@ -153,6 +153,7 @@ class ZEDGpuBridge:
         world_frame: bool = True,       # compute IMU-based R at warmup
         imu_warmup_frames: int = 20,    # gravity vector average window
         manual_pitch_deg: Optional[float] = None,  # override IMU with pitch angle
+        collect_cycle_stats: bool = False,  # A11 (2026-05-06) — opt-in cycle history
     ) -> None:
         self.device = device or torch.device("cuda:0")
         self.resolution = resolution
@@ -167,6 +168,12 @@ class ZEDGpuBridge:
         self._frames: Deque[ZEDFrame] = deque(maxlen=queue_size)
         self._frames_lock = threading.Lock()
         self._stop_event = threading.Event()
+
+        # A11 (2026-05-06) — opt-in cycle stats collection. When enabled, every
+        # _grab_one() appends a record. Allows post-hoc analysis of bridge cycle
+        # *in our code path* without consuming frames (Pipeline-thread-free).
+        self._collect_cycle_stats = collect_cycle_stats
+        self._cycle_stats: list = []
         self._capture_thread: Optional[threading.Thread] = None
         self._frame_id = 0
         # consume-once tracking: latest() returns each frame_id exactly once.
@@ -464,6 +471,21 @@ class ZEDGpuBridge:
         ready_ns = time.time_ns()
 
         self._frame_id += 1
+
+        # A11 — opt-in cycle stats (post-hoc analysis without consuming frame).
+        if self._collect_cycle_stats:
+            self._cycle_stats.append({
+                "frame_id": self._frame_id,
+                "ts_ns": ts_ns,
+                "grab_ms": cap.get("grab_ms", 0.0),
+                "retrieve_rgb_ms": cap.get("retrieve_rgb_ms", 0.0),
+                "getdata_rgb_ms": cap.get("getdata_rgb_ms", 0.0),
+                "pinned_rgb_ms": cap.get("pinned_rgb_ms", 0.0),
+                "retrieve_depth_ms": cap.get("retrieve_depth_ms", 0.0),
+                "getdata_depth_ms": cap.get("getdata_depth_ms", 0.0),
+                "bridge_proc_ms": (ready_ns - bridge_start_ns) / 1e6,
+            })
+
         return ZEDFrame(
             rgb_gpu=rgb_gpu,
             depth_gpu=depth_gpu,
@@ -587,3 +609,7 @@ class ZEDGpuBridge:
     @property
     def calibration(self) -> Dict[str, float]:
         return dict(self._calibration)
+
+    def get_cycle_stats(self) -> list:
+        """Return collected cycle stats (A11). Empty list if collect_cycle_stats=False."""
+        return list(self._cycle_stats)
