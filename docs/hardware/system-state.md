@@ -124,7 +124,28 @@
 - TRT INT8 quantization (YOLO26s)
 - Depth decimation / depth skip
 - ROS2 wrapper docs의 17-25ms를 raw SDK fact로 인용 (2026-05-05 추가)
-- PREEMPT_RT kernel 빌드 (2026-05-06 추가) — NVIDIA Jetson 공식 지원 제한, ROI 작음
+
+## RT kernel — 검토 후보 (★ 2026-05-06 정정)
+
+이전 메모에 "PREEMPT_RT 영구 기각" 박혀 있었으나 **검토 부족으로 잘못된 결정**. 다음 사실로 정정:
+
+- **NVIDIA가 JetPack 6.2 / L4T 36.4에 PREEMPT_RT 공식 지원** (apt 한 줄 설치 가능)
+- 적용 시 cyclictest Max 920μs → ~50-100μs 추정
+- 단 **boot-time freeze 보고됨** (GUI 진입 시) — NoMachine 환경에서 직접 영향, 복구 시 console 접근 필요
+- 단독 효과는 작음 (~1ms 추정, 우리 5ms spike 중 CPU 기여분만)
+- L1/L2 변경과 *세트로* 효과 극대화
+
+**적용 protocol** (아직 적용 안 함):
+1. nvidia-l4t-rt-kernel 패키지 확인
+2. 백업 + 복구 절차 검증
+3. `sudo apt install nvidia-l4t-rt-kernel ...` + reboot
+4. cyclictest 재측정 → 50-100μs 확인
+5. ZED SDK / TRT / nvargus-daemon 정상 동작 확인
+6. 효과 미미 또는 회귀 발생 시 즉시 `apt remove` + reboot
+
+**적용 시점**: L1 (post .cpu()) + L2 (interop) 완료 후 검토 — 단독으로는 작은 lever, 합치면 의미 있음.
+
+출처: NVIDIA Jetson Linux Developer Guide R38.4 RT kernel section, 사용자 forums (Orin NX 8GB JetPack 6.2 RT kernel 동작 사례).
 
 ## 현재 미입력 / 추후 받을 정보 (안전 검토 단계)
 
