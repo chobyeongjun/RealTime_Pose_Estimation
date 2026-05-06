@@ -372,20 +372,36 @@ class StreamedPosePipeline:
         # Runs AFTER t_end / t_gpu_done_ns so constraint CPU overhead does
         # not inflate either e2e or true_e2e_ms.
         world_frame_applied = "R_world_from_cam" in frame.calibration
-        t_constraint = time.perf_counter()
-        final_result = self._apply_constraints_and_fallback(
-            result, ts_s=frame.ts_ns * 1e-9
-        )
-        constraint_ms = (time.perf_counter() - t_constraint) * 1e3
+        # L_post Phase 0 (2026-05-06) — when ablation is active (PoseResult has
+        # GPU scalars instead of CPU floats), skip constraints (they call
+        # .item() which would re-introduce host sync) and skip tracer scalar
+        # meta (same reason). Final valid is decided in publish path after
+        # the single packed D2H.
+        ablation_active = result.valid_mask_t is not None
+        if ablation_active:
+            final_result = result
+            constraint_ms = 0.0
+            self.tracer.set_result_meta(
+                valid=False,            # placeholder — real value set after D2H
+                occluded_count=0,       # avoid .item() in ablation hot path
+                depth_invalid_ratio=0.0,
+                box_conf=0.0,
+            )
+        else:
+            t_constraint = time.perf_counter()
+            final_result = self._apply_constraints_and_fallback(
+                result, ts_s=frame.ts_ns * 1e-9
+            )
+            constraint_ms = (time.perf_counter() - t_constraint) * 1e3
 
-        # Emit trace AFTER synchronize so elapsed_time is safe to read.
-        self.tracer.set_result_meta(
-            valid=final_result.valid,
-            occluded_count=int((final_result.kpt_conf < self.post.kpt_conf_threshold).sum().item())
-            if final_result.valid else 0,
-            depth_invalid_ratio=final_result.depth_invalid_ratio,
-            box_conf=final_result.box_conf,
-        )
+            # Emit trace AFTER synchronize so elapsed_time is safe to read.
+            self.tracer.set_result_meta(
+                valid=final_result.valid,
+                occluded_count=int((final_result.kpt_conf < self.post.kpt_conf_threshold).sum().item())
+                if final_result.valid else 0,
+                depth_invalid_ratio=final_result.depth_invalid_ratio,
+                box_conf=final_result.box_conf,
+            )
         trace = self.tracer.end()
 
         # ─── true_e2e_ms decomposition (diagnostic visibility) ─────────

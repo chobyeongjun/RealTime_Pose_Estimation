@@ -123,6 +123,13 @@ def parse_args() -> argparse.Namespace:
              "bridge thread만 동작. 우리 코드 경로의 bridge cycle 격리. "
              "Pipeline 영향 0인 상태에서 bridge_proc/grab/retrieve 분포 측정.",
     )
+    ap.add_argument(
+        "--lpost-ablation", action="store_true",
+        help="L_post Phase 0 ablation — post 안 .cpu() 제거 + sticky/EMA/"
+             "constraints 모두 OFF. publish 직전 단일 통합 D2H. "
+             "Codex Round 6 권장 spec. Codex H_post 가설 (post host block이 "
+             "bridge에 영향) 양적 검증용. 측정 외 운영용 아님.",
+    )
     return ap.parse_args()
 
 
@@ -246,15 +253,28 @@ def main() -> int:
     LOGGER.info("engine input dtype = %s, matching preproc accordingly", engine_in_dtype)
     pre = GpuPreprocessor(imgsz=args.imgsz, device=device, dtype=engine_in_dtype)
     post = GpuPostprocessor(
-        schema=schema, device=device, use_filter=args.use_filter
+        schema=schema,
+        device=device,
+        use_filter=args.use_filter,
+        lpost_ablation=args.lpost_ablation,   # L_post Phase 0
     )
     stack = ConstraintStack()
-    if args.bone_constraint:
-        stack.bone_length = BoneLengthConstraint(schema, device=device)
-    if args.velocity_bound_mps > 0:
-        stack.joint_velocity = JointVelocityBound(
-            max_velocity_mps=args.velocity_bound_mps, device=device
-        )
+    # L_post Phase 0: constraints OFF (Codex Round 6 권장). They call .item()
+    # internally which would defeat the post .cpu() removal. Re-enable in
+    # production after L_post Phase 1 (overlap) lands.
+    if args.lpost_ablation:
+        if args.bone_constraint or args.velocity_bound_mps > 0:
+            LOGGER.warning(
+                "--lpost-ablation: ignoring --bone-constraint / "
+                "--velocity-bound-mps (constraints disabled in ablation mode)"
+            )
+    else:
+        if args.bone_constraint:
+            stack.bone_length = BoneLengthConstraint(schema, device=device)
+        if args.velocity_bound_mps > 0:
+            stack.joint_velocity = JointVelocityBound(
+                max_velocity_mps=args.velocity_bound_mps, device=device
+            )
 
     bridge = ZEDGpuBridge(
         resolution=args.resolution,
@@ -556,22 +576,45 @@ def main() -> int:
                 )
 
             if publisher is not None:
-                # Batch three small D2H copies into a single stream op by
-                # flattening and concatenating. post_stream was already
-                # synchronized inside pipeline.run_overlapped_step, so
-                # .to("cpu") here is just a memcpy — but doing it once
-                # instead of three times saves ~2 ms p95 jitter vs the
-                # prior version.
+                # Batch D2H — single sync, packed transfer.
                 K = tick.result.kpts_3d_m.shape[0]
-                flat_gpu = torch.cat([
-                    tick.result.kpts_3d_m.reshape(-1),     # K*3
-                    tick.result.kpt_conf.reshape(-1),      # K
-                    tick.result.kpts_2d_px.reshape(-1),    # K*2
-                ], dim=0)
-                flat = flat_gpu.detach().to("cpu", non_blocking=False).numpy().astype(np.float32)
-                kpts_3d = flat[:K*3].reshape(K, 3)
-                kpt_conf = flat[K*3:K*3 + K]
-                kpts_2d = flat[K*3 + K:].reshape(K, 2)
+                if args.lpost_ablation and tick.result.valid_mask_t is not None:
+                    # L_post Phase 0 ablation path: post returned GPU scalars
+                    # (box_conf_t, valid_mask_t, depth_invalid_ratio_t) — pack
+                    # them with kpts into a single D2H, then resolve valid /
+                    # box_conf / depth_invalid_ratio on CPU.
+                    flat_gpu = torch.cat([
+                        tick.result.kpts_3d_m.reshape(-1),                   # K*3
+                        tick.result.kpt_conf.reshape(-1),                    # K
+                        tick.result.kpts_2d_px.reshape(-1),                  # K*2
+                        tick.result.box_conf_t.reshape(-1),                  # 1
+                        tick.result.valid_mask_t.float().reshape(-1),        # 1
+                        tick.result.depth_invalid_ratio_t.reshape(-1),       # 1
+                    ], dim=0)
+                    flat = flat_gpu.detach().to("cpu", non_blocking=False).numpy().astype(np.float32)
+                    kpts_3d = flat[:K*3].reshape(K, 3)
+                    kpt_conf = flat[K*3:K*3 + K]
+                    kpts_2d = flat[K*3 + K:K*3 + K + K*2].reshape(K, 2)
+                    # Resolve scalars on CPU (single sync above already done)
+                    gpu_box_conf = float(flat[K*3 + K + K*2])
+                    gpu_valid = bool(flat[K*3 + K + K*2 + 1] > 0.5)
+                    gpu_depth_invalid = float(flat[K*3 + K + K*2 + 2])
+                    # Stamp back onto tick.result so SLOW logging / publish
+                    # downstream see real values (fields started as placeholders).
+                    tick.result.box_conf = gpu_box_conf
+                    tick.result.valid = gpu_valid
+                    tick.result.depth_invalid_ratio = gpu_depth_invalid
+                else:
+                    # Standard path — kpts only, scalars already CPU floats.
+                    flat_gpu = torch.cat([
+                        tick.result.kpts_3d_m.reshape(-1),     # K*3
+                        tick.result.kpt_conf.reshape(-1),      # K
+                        tick.result.kpts_2d_px.reshape(-1),    # K*2
+                    ], dim=0)
+                    flat = flat_gpu.detach().to("cpu", non_blocking=False).numpy().astype(np.float32)
+                    kpts_3d = flat[:K*3].reshape(K, 3)
+                    kpt_conf = flat[K*3:K*3 + K]
+                    kpts_2d = flat[K*3 + K:].reshape(K, 2)
 
                 # SAFETY: HARD LIMIT decision must be made just before SHM write.
                 # true_e2e_ms (GPU done) + post-GPU D2H + CPU packing has already

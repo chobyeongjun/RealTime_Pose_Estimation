@@ -42,6 +42,14 @@ class PoseResult:
     box_conf: float
     valid: bool                # False when no person was detected above threshold
     depth_invalid_ratio: float  # 0..1 — fraction of keypoints whose depth was bad
+    # L_post Phase 0 (2026-05-06) — GPU-only fields used in `--lpost-ablation` mode.
+    # When ablation flag is set, these carry the GPU-resident scalars and the
+    # legacy float fields above are placeholders (will be filled by the publish
+    # path after a single packed D2H). When ablation flag is OFF, these stay
+    # None and the legacy float/bool path runs unchanged.
+    box_conf_t: Optional[torch.Tensor] = None        # (), float
+    valid_mask_t: Optional[torch.Tensor] = None      # (), bool
+    depth_invalid_ratio_t: Optional[torch.Tensor] = None  # (), float
 
 
 class OneEuroFilter1D:
@@ -109,6 +117,7 @@ class GpuPostprocessor:
         device: Optional[torch.device] = None,
         use_filter: bool = False,        # ⚠ skiro-learnings: keep OFF by default
         filter_params: Optional[dict] = None,
+        lpost_ablation: bool = False,   # L_post (2026-05-06) — see __call__
     ) -> None:
         self.schema = schema
         self.K = schema.num_keypoints
@@ -153,6 +162,7 @@ class GpuPostprocessor:
         )
         self.device = device or torch.device("cuda:0")
         self.use_filter = use_filter
+        self.lpost_ablation = lpost_ablation
         self._filter: Optional[OneEuroFilter1D] = None
         if use_filter:
             fp = filter_params or {}
@@ -261,6 +271,31 @@ class GpuPostprocessor:
             # Ankles are frequently occluded and should not flip the validity
             # flag when the upper-leg chain is cleanly visible.
             num_low_conf_t = (kp_conf[self._core_mask_t] < self.kpt_conf_threshold).sum().float()
+
+            # L_post Phase 0 (2026-05-06) — pure GPU ablation path.
+            # Bypasses sticky/EMA/CPU-branch logic. valid_mask resolved on GPU,
+            # publish stage performs the single packed D2H. Constraints are
+            # also disabled by the caller in this mode (pipeline.py skips
+            # _apply_constraints_and_fallback when result has valid_mask_t set).
+            if self.lpost_ablation:
+                valid_mask_t = (
+                    (box_conf_t >= self.conf_threshold)
+                    & (num_low_conf_t < float(self.occluded_count))
+                )
+                return PoseResult(
+                    kpts_2d_px=xy_src,
+                    kpts_3d_m=kpts_3d,
+                    kpt_conf=kp_conf,
+                    # Legacy fields are placeholders — publish path fills them
+                    # via single packed D2H. Pipeline must NOT inspect these
+                    # in ablation mode (use *_t fields instead).
+                    box_conf=0.0,
+                    valid=False,
+                    depth_invalid_ratio=0.0,
+                    box_conf_t=box_conf_t,
+                    valid_mask_t=valid_mask_t,
+                    depth_invalid_ratio_t=invalid_ratio_t,
+                )
 
             # === Single D2H sync — combine 3 scalars into 1 transfer ===
             scalars = torch.stack([box_conf_t, num_low_conf_t, invalid_ratio_t]).cpu()
