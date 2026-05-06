@@ -231,6 +231,64 @@ class StreamedPosePipeline:
     # ------------------------------------------------------------------
     # Overlapped run — the real deal
     # ------------------------------------------------------------------
+    def run_overlapped_step_mock(self) -> Optional[PipelineTick]:
+        """A6 (2026-05-06) — bridge-only 격리용 mock. GPU 작업 모두 skip.
+
+        목적: full pipeline의 bridge cycle 26ms vs bridge_only_bench의 8.2ms
+        차이 (+18ms 적체)의 원인을 격리.
+          - mock에서 bridge cycle 회복 → TRT/preproc/post가 진짜 원인 (H1-H4)
+          - mock에서도 26ms 그대로 → bridge thread 자체 문제 (H5)
+
+        이 mock은 frame을 받아 *즉시 zeros PoseResult* 반환. preproc/TRT/post
+        호출 없음. decomp 측정만 정상 작동 (zed_lag, bridge_proc, queue_wait,
+        pipeline_proc).
+        """
+        frame = self.bridge.latest(timeout=0.5)
+        if frame is None:
+            return None
+
+        pickup_ns = time.time_ns()
+        self._frame_count += 1
+
+        # GPU 작업 모두 skip — zeros PoseResult (publish는 valid=False로 통과)
+        K = self.post.K
+        zeros_3d = torch.zeros((K, 3), device=self.post.device)
+        zeros_2d = torch.zeros((K, 2), device=self.post.device)
+        zeros_conf = torch.zeros((K,), device=self.post.device)
+        result = PoseResult(
+            kpts_2d_px=zeros_2d,
+            kpts_3d_m=zeros_3d,
+            kpt_conf=zeros_conf,
+            box_conf=0.0,
+            valid=False,
+            depth_invalid_ratio=1.0,
+        )
+
+        t_gpu_done_ns = time.time_ns()
+
+        # decomp 측정 (full pipeline과 동일 anchor)
+        zed_lag_ms = (frame.bridge_start_ns - frame.ts_ns) / 1e6 if frame.bridge_start_ns else 0.0
+        bridge_proc_ms = (frame.ready_ns - frame.bridge_start_ns) / 1e6 if frame.bridge_start_ns and frame.ready_ns else 0.0
+        queue_wait_ms = (pickup_ns - frame.ready_ns) / 1e6 if frame.ready_ns else 0.0
+        pipeline_proc_ms = (t_gpu_done_ns - pickup_ns) / 1e6
+
+        return PipelineTick(
+            frame_id=frame.frame_id,
+            ts_ns=frame.ts_ns,
+            result=result,
+            world_frame_applied=False,
+            latency_ms={
+                "e2e": 0.0,
+                "constraint_ms": 0.0,
+                "true_e2e_ms": (t_gpu_done_ns - frame.ts_ns) / 1e6,
+                "zed_lag_ms": zed_lag_ms,
+                "bridge_proc_ms": bridge_proc_ms,
+                "queue_wait_ms": queue_wait_ms,
+                "pipeline_proc_ms": pipeline_proc_ms,
+                **frame.capture_ms,
+            },
+        )
+
     def run_overlapped_step(self) -> Optional[PipelineTick]:
         """Consume the latest ZED frame, advance streams, return last finished."""
         frame = self.bridge.latest(timeout=0.5)

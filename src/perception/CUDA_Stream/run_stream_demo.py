@@ -111,6 +111,12 @@ def parse_args() -> argparse.Namespace:
              "leaning 32° down). Overrides IMU warmup — most reliable path.",
     )
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument(
+        "--mock-pipeline", action="store_true",
+        help="A6 진단 — TRT/preproc/post를 mock으로 대체. bridge cycle 격리용. "
+             "publish는 valid=False로 통과. 결과 의미 없음 (zeros). "
+             "full pipeline의 bridge_proc 26ms vs bridge-only 8.2ms 차이 격리.",
+    )
     return ap.parse_args()
 
 
@@ -343,7 +349,11 @@ def main() -> int:
         while not stop_flag["stop"]:
             if time.monotonic() - t0 > args.duration:
                 break
-            tick = pipeline.run_overlapped_step()
+            tick = (
+                pipeline.run_overlapped_step_mock()
+                if args.mock_pipeline
+                else pipeline.run_overlapped_step()
+            )
             if tick is None:
                 # bridge had no new frame within its 0.5s poll window.
                 # Skip publish (don't ship stale data); count for diagnostics.
