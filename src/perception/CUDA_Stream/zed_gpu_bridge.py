@@ -444,12 +444,16 @@ class ZEDGpuBridge:
         t0 = time.perf_counter()
         # IMPORTANT: skiro-learnings — always copy=True to avoid race with
         # next grab(); the copy cost at SVGA is ~0.5ms.
+        # L1 (2026-05-06): keep BGRA 4-channel as-is. The previous
+        # `np.ascontiguousarray(bgra[:,:,:3][:,:,::-1])` was costing ~4ms
+        # (A11 measurement 2026-05-06: getdata_rgb 0.36ms in raw bench vs
+        # 4.76ms here). GPU preproc now handles BGR→RGB channel select +
+        # alpha drop on the GPU side at sub-microsecond cost.
         bgra_host = self._image_mat.get_data(deep_copy=True)
-        rgb_host = np.ascontiguousarray(bgra_host[:, :, :3][:, :, ::-1])  # BGR->RGB
         cap["getdata_rgb_ms"] = (time.perf_counter() - t0) * 1e3
 
         t0 = time.perf_counter()
-        rgb_pinned = self._get_pinned_rgb(rgb_host)
+        rgb_pinned = self._get_pinned_rgb(bgra_host)   # BGRA 4ch (was RGB 3ch pre-L1)
         cap["pinned_rgb_ms"] = (time.perf_counter() - t0) * 1e3
 
         depth_pinned = None
