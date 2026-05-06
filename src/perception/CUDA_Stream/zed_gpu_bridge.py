@@ -174,6 +174,18 @@ class ZEDGpuBridge:
         # *in our code path* without consuming frames (Pipeline-thread-free).
         self._collect_cycle_stats = collect_cycle_stats
         self._cycle_stats: list = []
+
+        # L2a (2026-05-06) — event pool. Per-frame torch.cuda.Event() allocation
+        # was a confirmed contention source (Codex R5/R7-Q5: enable_timing=True +
+        # alloc churn affects p99 jitter). Pool size = queue_size + 1 = 3
+        # matches pinned/GPU buffer ownership. Codex Q3 verified case-1 reuse
+        # safety: pipeline always calls wait_event() *before* bridge re-records
+        # the same slot, so the host-enqueued wait captures the old record per
+        # cudaStreamWaitEvent semantics. enable_timing=False — events are
+        # dependency markers, not timing sources (no elapsed_time() callers
+        # found via grep). Allocated lazily on first _upload() call.
+        self._event_pool: list = []
+        self._event_pool_idx = 0
         self._capture_thread: Optional[threading.Thread] = None
         self._frame_id = 0
         # consume-once tracking: latest() returns each frame_id exactly once.
@@ -557,6 +569,20 @@ class ZEDGpuBridge:
             )
             return rgb_gpu, depth_gpu, None
 
+        # L2a (2026-05-06) — event pool reuse instead of per-frame allocation.
+        # Lazily allocated on first call (saves init cost when CUDA is the
+        # fallback path). enable_timing=False per Codex Q3 (no elapsed_time
+        # callers; timing variant is heavier).
+        if not self._event_pool:
+            self._event_pool = [
+                torch.cuda.Event(enable_timing=False, blocking=False)
+                for _ in range(self._pool_size)
+            ]
+            self._event_pool_idx = 0
+        slot = self._event_pool_idx % self._pool_size
+        self._event_pool_idx += 1
+        event = self._event_pool[slot]
+
         with torch.cuda.stream(self._h2d_stream):
             rgb_gpu = rgb_pinned.to(self.device, non_blocking=True)
             depth_gpu = (
@@ -564,7 +590,6 @@ class ZEDGpuBridge:
                 if depth_pinned is not None
                 else None
             )
-            event = torch.cuda.Event(enable_timing=True, blocking=False)
             event.record(self._h2d_stream)
         return rgb_gpu, depth_gpu, event
 
