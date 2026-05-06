@@ -5,6 +5,7 @@
 # 결과 한 번에 비교. 각 case 마다 launch_clean.sh 20s.
 #
 # 사용법:
+#   sudo bash scripts/zedlag_sweep.sh fps        # Round 0 — 120/60/30 (★ ISP buffer 결정적 격리)
 #   sudo bash scripts/zedlag_sweep.sh exposure   # Round 1 — AUTO/5/8/12ms
 #   sudo bash scripts/zedlag_sweep.sh depth      # Round 2 — PERFORMANCE/QUALITY/ULTRA
 #   sudo bash scripts/zedlag_sweep.sh sensing    # Round 3 — STANDARD/FILL
@@ -43,8 +44,18 @@ run_case() {
 }
 
 case "$ROUND" in
+    fps)
+        # Plan v7 Round 0 — ISP buffer 가설의 결정적 격리.
+        # 가설: zed_lag 가 1/fps 에 비례 → frame N 개 buffered (Jetson ISP).
+        # 결과:
+        #   120fps zed_lag ≈ 21ms (현재) → 60fps 시 ≈ 42ms = ISP buffer ✓
+        #                                → 60fps 시 변화 없음 = 다른 가설
+        run_case "fps_120" --fps 120
+        run_case "fps_60"  --fps 60
+        run_case "fps_30"  --fps 30
+        ;;
     exposure)
-        run_case "auto"      ""
+        run_case "auto"        ""
         run_case "manual_5ms"  --exposure-us 5000
         run_case "manual_8ms"  --exposure-us 8000
         run_case "manual_12ms" --exposure-us 12000
@@ -59,7 +70,7 @@ case "$ROUND" in
         run_case "fill"     --sensing-mode FILL
         ;;
     *)
-        echo "ERROR: unknown round '${ROUND}'. Use {exposure|depth|sensing}"
+        echo "ERROR: unknown round '${ROUND}'. Use {fps|exposure|depth|sensing}"
         exit 1
         ;;
 esac
