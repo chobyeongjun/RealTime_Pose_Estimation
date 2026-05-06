@@ -1,8 +1,79 @@
-# 2026-05-05 Session Summary
+# 2026-05-05 ~ 2026-05-06 Session Summary
 
 ## 한 줄 요약
 
-ROS2 출처를 raw SDK fact로 잘못 단정한 발언들 정정 + Codex 4 round 검증으로 **진짜 발견 2개** 확보 (`4 stream 사실상 직렬`, `post .cpu() host block`) + 다음 행동 명확화.
+ROS2 출처를 raw SDK fact로 잘못 단정한 발언들 정정 + Codex 4 round 검증으로 **진짜 발견 2개** 확보 (`4 stream 사실상 직렬`, `post .cpu() host block`) + Step 0/1 사전 진단으로 **★ ZED ctx = PyTorch ctx 확정** (DLPack interop 길 1주로 단축) + 다음 행동 명확화.
+
+---
+
+## 2026-05-06 Step 0/1 사전 진단 실측 결과 (★ NEW)
+
+### 1. cyclictest (RT scheduling jitter)
+```
+T:0  P:90  I:1000  C:30000  Min: 1μs  Avg: 34μs  Max: 920μs
+```
+- **Max 0.92ms** = boundary 영역 (정상~문제 경계)
+- 우리 5ms p99 spike의 1/5 수준 → **CPU/RT는 dominant 원인 아님**
+- mlockall 적용 시 920μs → ~50μs 가능, 효과 제한적
+
+### 2. /proc/cmdline (boot param)
+```
+root=PARTUUID=... rw rootwait rootfstype=ext4 mminit_loglevel=4 ...
+```
+- **isolcpus / nohz_full / rcu_nocbs 모두 없음** (Jetson default boot)
+- boot-level isolation 미적용 — 적용해도 효과 작을 듯 (cyclictest 결과로 추정)
+
+### 3. /proc/interrupts (IRQ 분포)
+- **IRQ가 CPU0에 집중** (xhci-hcd=7008, snd_hda_tegra=1320, i2c=237, …)
+- CPU1-7은 거의 0
+- arch_timer만 모든 코어 정상 분산
+- → perception cores 2-5와 **충돌 없음**, IRQ affinity 조정 불필요
+
+### 4. ★ ZED + PyTorch CUDA context (가장 큰 발견)
+```
+torch init       → 0xaaaac14562d0
+zed open         → 0xaaaac14562d0   ← 같음
+zed grab         → 0xaaaac14562d0
+retrieve_image   → 0xaaaac14562d0
+retrieve_measure → 0xaaaac14562d0
+```
+- **PyTorch primary context와 ZED SDK가 동일 CUDA context** (`0xaaaac14562d0`)
+- Codex R5 가설 (다를 가능성 0.6) **틀림**
+- → **ZED CUDA interop이 DLPack 경로로 가능** (~1주, C++ extension 회피)
+- L2 (interop) 우선순위 격상
+
+### 5. CPU isolation 토론 결과
+- 사용자 기억 ("core 나눴더니 frame 떨어짐") = 더 강한 isolation 시도 (isolcpus boot param 또는 1-2 core만)
+- 현재 적용된 `taskset -c 2,3,4,5` (4 core)는 skiro-learnings SOLVED 그대로 → **유지**
+- → 옵션 C 측정 비교 불필요 결정
+
+### 6. mlockall — launch_clean.sh audit 확정
+- 코드 grep: `mlockall` 또는 `MCL_CURRENT/MCL_FUTURE` 호출 **0 hits**
+- launch_clean.sh:84은 `ulimit -l unlimited`만 (한도만 풀림, 실제 lock 안 함)
+- → mlockall 미적용 확정. cyclictest 결과로 적용 효과 작을 것 추정
+
+### 7. ZED SDK warning (참고)
+```
+[ZED][WARNING] PERFORMANCE is deprecated. Please update your configuration to use NEURAL instead.
+```
+- **무시**. NEURAL은 영구 기각 (TRT와 SM 경합).
+
+---
+
+## Lever 우선순위 재정렬 (Step 0/1 결과 반영)
+
+| Lever | 이전 | 이번 결과 후 | 작업 시간 |
+|---|---|---|---|
+| **L1: post `.cpu()` 제거 + packed D2H** | 1순위 | 1순위 (불변) | 3-4h |
+| **L2: ZED CUDA interop (DLPack)** | 1-2주 | ★ **2순위로 격상** (1주 확정) | ~1주 |
+| **L3: mlockall + nohz_full** | 검토 | **후순위** (cyclictest 결과 효과 작음) | — |
+| **L4: IRQ affinity** | 검토 | **불필요** (CPU0 집중) | — |
+
+→ **L1 → L2** 두 변경에 집중. L3/L4 생략 가능.
+
+---
+
+## 한 줄 요약 (이전 작업)
 
 ---
 
