@@ -674,6 +674,31 @@ def main() -> int:
                     actual_publish_list.append(actual_publish_ms)
                 watchdog.note_publish()
     finally:
+        # Diagnostic counter dump (Codex R11, 2026-05-06) BEFORE destruction.
+        # If graph_replay_count == frame_count and eager_count == 0 → graph
+        # is healthy → 6.6ms overhead is NOT H1.
+        # If set_address_count >> n_io after warmup → bind cache broken → H2.
+        try:
+            inf_graph = getattr(pipeline, "_inf_graph", None)
+            if inf_graph is not None:
+                LOGGER.info(
+                    "[diag] inf_graph captured=%s replay=%d eager=%d "
+                    "set_address=%d frames=%d",
+                    inf_graph.captured,
+                    inf_graph.replay_count,
+                    inf_graph.eager_count,
+                    runner.set_address_count,
+                    pipeline._frame_count,
+                )
+            else:
+                LOGGER.info(
+                    "[diag] inf_graph=None set_address=%d frames=%d",
+                    runner.set_address_count,
+                    pipeline._frame_count,
+                )
+        except Exception as exc:
+            LOGGER.warning("[diag] counter dump failed: %s", exc)
+
         # Shutdown ordering matters: drain streams BEFORE destroying the
         # TRT engine. Reverse of construction: watchdog → bridge →
         # pipeline (which sync_all streams) → runner (del) → publisher.

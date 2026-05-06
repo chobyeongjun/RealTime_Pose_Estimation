@@ -121,6 +121,13 @@ class TRTRunner:
         self._input_names: List[str] = []
         self._output_names: List[str] = []
 
+        # Diagnostic counter (Codex R11, 2026-05-06) — set_tensor_address is
+        # expensive and triggers TRT 10.x graph re-validation. Caller path
+        # bind_input_address has a per-pointer cache so the steady-state count
+        # should plateau quickly. If it grows linearly with frame_count,
+        # cache is broken → that's the +6.6ms vs trtexec.
+        self._set_address_count = 0
+
         n_io = self.engine.num_io_tensors
         for i in range(n_io):
             name = self.engine.get_tensor_name(i)
@@ -146,6 +153,7 @@ class TRTRunner:
             )
             (self._input_names if is_input else self._output_names).append(name)
             self.context.set_tensor_address(name, int(tensor.data_ptr()))
+            self._set_address_count += 1
 
         LOGGER.info(
             "TRTRunner loaded %s : inputs=%s outputs=%s",
@@ -224,11 +232,18 @@ class TRTRunner:
         # identity change (cached_refs.get(name) is not tensor).
         if cached_ptrs.get(name) != new_ptr or cached_refs.get(name) is not tensor:
             self.context.set_tensor_address(name, new_ptr)
+            self._set_address_count += 1
             cached_ptrs[name] = new_ptr
             cached_refs[name] = tensor
 
     def get_output(self, name: str) -> torch.Tensor:
         return self.bindings[name].tensor
+
+    @property
+    def set_address_count(self) -> int:
+        """Codex R11: cumulative set_tensor_address calls. Should plateau
+        at (n_inputs + n_outputs) after warmup. Linear growth = cache miss."""
+        return self._set_address_count
 
     # ------------------------------------------------------------------
     # Inference

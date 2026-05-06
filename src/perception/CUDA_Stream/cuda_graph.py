@@ -34,6 +34,11 @@ class GraphedStep:
         self._warmup_iters = warmup
         self._captured = False
         self._capture_error: Optional[str] = None
+        # Diagnostic counters (Codex R11, 2026-05-06) — verify actual graph
+        # replay vs eager fallback. inf 13ms vs trtexec 6.4ms could be either
+        # H1 (graph not replaying) or H3 (GPU contention with ZED/bridge).
+        self._replay_count = 0
+        self._eager_count = 0
 
     def try_capture(self, max_retries: int = 3) -> bool:
         """Warm up then capture. Returns True on success.
@@ -111,9 +116,11 @@ class GraphedStep:
     def replay(self) -> None:
         if self._captured and self._graph is not None:
             self._graph.replay()
+            self._replay_count += 1
         else:
             with torch.cuda.stream(self.stream):
                 self.fn()
+            self._eager_count += 1
 
     @property
     def captured(self) -> bool:
@@ -122,6 +129,18 @@ class GraphedStep:
     @property
     def capture_error(self) -> Optional[str]:
         return self._capture_error
+
+    @property
+    def replay_count(self) -> int:
+        """Codex R11: number of actual graph.replay() calls. If this stays
+        small while frame_count grows, capture failed and we're in eager."""
+        return self._replay_count
+
+    @property
+    def eager_count(self) -> int:
+        """Codex R11: number of eager fallback executions. Should be 0 in
+        production. If non-zero, graph capture failed silently."""
+        return self._eager_count
 
 
 @contextlib.contextmanager
