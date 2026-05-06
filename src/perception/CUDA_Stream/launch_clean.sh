@@ -17,6 +17,8 @@
 set -e
 
 DURATION="${1:-60}"
+shift || true
+EXTRA_ARGS="$@"   # additional flags forwarded to run_stream_demo (e.g. --mock-pipeline)
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ROOT="$(cd "$DIR/../../.." && pwd)"
 ENGINE="$DIR/yolo26s-lower6-v2.engine"
@@ -90,4 +92,5 @@ exec chrt -r 90 sudo -u "$ORIGINAL_USER" -H env \
         --schema lowlimb6 --resolution SVGA \
         --duration "$DURATION" \
         --bone-constraint \
-        --velocity-bound-mps 8.0
+        --velocity-bound-mps 8.0 \
+        $EXTRA_ARGS
