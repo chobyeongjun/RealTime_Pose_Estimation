@@ -4,13 +4,15 @@ commit: `c2ac670` (system-state RT kernel 적용 안 함 결정 후)
 
 ## 결과
 
-| Run | Hz | true_e2e p50 | true_e2e p99 | actual_publish p99 | bridge_proc p99 | pipeline_proc p99 | HARD 위반 |
-|---|---|---|---|---|---|---|---|
-| 1 | 37.5 | 66.6 ms | 80.9 ms | 82.7 ms | 14.2 | 25.5 | 100% |
-| 2 | 37.9 | 65.5 ms | 79.6 ms | 81.4 ms | 14.8 | 25.4 | 100% |
-| 3 | 39.1 | 64.5 ms | 75.8 ms | 77.7 ms | 18.6 | 24.7 | 100% |
-| 4 | 39.0 | 64.0 ms | 76.8 ms | 78.7 ms | 14.4 | 24.9 | 100% |
-| Run 5 | (paste 잘림 — 다음 측정 시 보충) |
+| Run | timestamp | Hz | true_e2e p50 | true_e2e p99 | actual_publish p99 | bridge_proc p99 | pipeline_proc p99 | HARD 위반 |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 11:08 | 37.6 | 66.1 ms | 80.2 ms | 81.9 ms | **21.2** ⚠ | 25.3 | 100% |
+| 2 | 11:10 | 37.5 | 66.6 ms | 80.9 ms | 82.7 ms | 14.2 | 25.5 | 100% |
+| 3 | 11:11 | 37.9 | 65.5 ms | 79.6 ms | 81.4 ms | 14.8 | 25.4 | 100% |
+| 4 | 11:13 | 39.1 | 64.5 ms | 75.8 ms | 77.7 ms | 18.6 | 24.7 | 100% |
+| 5 | 11:15 | 39.0 | 64.0 ms | 76.8 ms | 78.7 ms | 14.4 | 24.9 | 100% |
+
+Run 1 bridge_proc p99=21.2 다른 runs (14-19)보다 큼 — *warmup 영향* 추정 (첫 run, ZED daemon 정렬 안 됨).
 
 **Mean / spread**:
 - Hz mean = 38.4, spread (max-min)/mean = 4.2% ✓ Inv2 PASS
