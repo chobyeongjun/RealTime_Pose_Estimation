@@ -10,7 +10,7 @@
 |---|---|---|
 | Jetson 모델 | Orin NX 16GB (Ampere 1024 CUDA cores) | `torch.cuda.get_device_name(0)` = "Orin" |
 | 전체 RAM | 15 Gi total / 12 Gi available | `free -h` |
-| JetPack / L4T | **R36.4.7** (Sep 2025 build, JetPack 6.2.x) | `/etc/nv_tegra_release` |
+| JetPack | **6.2.1** (L4T R36.4.7, Sep 2025 build) | `/etc/nv_tegra_release` + 사용자 확인 |
 | Kernel | **5.15.148-tegra PREEMPT** (NOT PREEMPT_RT) | `uname -v` |
 | CUDA | 12.6 (V12.6.68) | `nvcc --version` |
 | TensorRT | 10.3.0 | `tensorrt.__version__` |
