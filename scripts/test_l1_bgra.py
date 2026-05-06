@@ -24,7 +24,8 @@ def test_bgra_equivalent_to_rgb():
         return
 
     H, W = 600, 960
-    device = torch.device("cuda")
+    # PyTorch device("cuda") and device("cuda:0") are not equal — must specify index
+    device = torch.device("cuda:0")
 
     # 합성 BGRA (B=10, G=100, R=200, A=255)
     bgra = np.zeros((H, W, 4), dtype=np.uint8)
@@ -65,11 +66,12 @@ def test_shape_validation():
     if not torch.cuda.is_available():
         print("  (skipped — no CUDA)")
         return
-    pre = GpuPreprocessor(imgsz=640, dtype=torch.float32)
+    device = torch.device("cuda:0")
+    pre = GpuPreprocessor(imgsz=640, dtype=torch.float32, device=device)
     stream = torch.cuda.Stream()
 
     # 5-channel — 에러
-    bad = torch.zeros((100, 100, 5), dtype=torch.uint8, device="cuda")
+    bad = torch.zeros((100, 100, 5), dtype=torch.uint8, device=device)
     try:
         pre(bad, stream=stream)
         assert False, "5-channel should raise"
