@@ -176,14 +176,22 @@ class ZEDGpuBridge:
         self._cycle_stats: list = []
 
         # L2a (2026-05-06) — event pool. Per-frame torch.cuda.Event() allocation
-        # was a confirmed contention source (Codex R5/R7-Q5: enable_timing=True +
-        # alloc churn affects p99 jitter). Pool size = queue_size + 1 = 3
-        # matches pinned/GPU buffer ownership. Codex Q3 verified case-1 reuse
-        # safety: pipeline always calls wait_event() *before* bridge re-records
-        # the same slot, so the host-enqueued wait captures the old record per
-        # cudaStreamWaitEvent semantics. enable_timing=False — events are
-        # dependency markers, not timing sources (no elapsed_time() callers
-        # found via grep). Allocated lazily on first _upload() call.
+        # is a *suspected* p99 jitter source (Codex R5/R7-Q5: enable_timing=True
+        # + alloc churn) — to be confirmed by Full pipeline ablation measurement.
+        # Pool size = queue_size + 1 = 3 matches pinned/GPU buffer ownership.
+        # Reuse semantics (Codex Q1/Q2 reviewed):
+        #   - If pipeline enqueues wait_event(event) before bridge re-records,
+        #     cudaStreamWaitEvent captures the old record (correct H2D dep).
+        #   - If reuse happens first (OS preemption), wait may over-wait for a
+        #     newer record. This is safe ONLY because L2a keeps GPU tensors as
+        #     per-frame .to() allocations — old `rgb_gpu`/`depth_gpu` storage
+        #     is never overwritten by a new frame. Do NOT carry this reasoning
+        #     into L2b (GPU tensor ring): tensor slot reuse needs consumer
+        #     release/event refcount, not raw event pooling.
+        # enable_timing=False — events are dependency markers, not timing
+        # sources (no `elapsed_time()` callers grep'd in bridge code path;
+        # tracer.py uses its own timing events). Allocated lazily on first
+        # _upload() call.
         self._event_pool: list = []
         self._event_pool_idx = 0
         self._capture_thread: Optional[threading.Thread] = None
@@ -560,7 +568,10 @@ class ZEDGpuBridge:
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional["torch.cuda.Event"]]:
         """Run H2D on the private capture stream and record a ready event."""
         if self._h2d_stream is None:
-            # e.g. CUDA unavailable → eager path (dev machines)
+            # CUDA stream not available — eager path. Note: self.device defaults
+            # to cuda:0; if the host has no CUDA at all the .to(self.device)
+            # call below raises. CPU-only dev environments must pass
+            # device=torch.device("cpu") explicitly to ZEDGpuBridge.
             rgb_gpu = rgb_pinned.to(self.device, non_blocking=True)
             depth_gpu = (
                 depth_pinned.to(self.device, non_blocking=True)
