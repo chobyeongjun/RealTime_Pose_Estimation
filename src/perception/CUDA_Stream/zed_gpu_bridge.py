@@ -175,25 +175,15 @@ class ZEDGpuBridge:
         self._collect_cycle_stats = collect_cycle_stats
         self._cycle_stats: list = []
 
-        # L2a (2026-05-06) — event pool. Per-frame torch.cuda.Event() allocation
-        # is a *suspected* p99 jitter source (Codex R5/R7-Q5: enable_timing=True
-        # + alloc churn) — to be confirmed by Full pipeline ablation measurement.
-        # Pool size = queue_size + 1 = 3 matches pinned/GPU buffer ownership.
-        # Reuse semantics (Codex Q1/Q2 reviewed):
-        #   - If pipeline enqueues wait_event(event) before bridge re-records,
-        #     cudaStreamWaitEvent captures the old record (correct H2D dep).
-        #   - If reuse happens first (OS preemption), wait may over-wait for a
-        #     newer record. This is safe ONLY because L2a keeps GPU tensors as
-        #     per-frame .to() allocations — old `rgb_gpu`/`depth_gpu` storage
-        #     is never overwritten by a new frame. Do NOT carry this reasoning
-        #     into L2b (GPU tensor ring): tensor slot reuse needs consumer
-        #     release/event refcount, not raw event pooling.
-        # enable_timing=False — events are dependency markers, not timing
-        # sources (no `elapsed_time()` callers grep'd in bridge code path;
-        # tracer.py uses its own timing events). Allocated lazily on first
-        # _upload() call.
-        self._event_pool: list = []
-        self._event_pool_idx = 0
+        # L2a REVERTED (2026-05-06) — event pool was net-negative in Full pipeline.
+        # Measurement: 3 runs mean true_e2e p99 +5.9ms vs L1-only, bridge_proc
+        # p99 +2.3ms, queue_wait p99 +6.4ms. Hypothesis: cudaStreamWaitEvent
+        # case-2 over-wait (Codex Q2) — when bridge re-records the slot before
+        # pipeline enqueues wait, the host-enqueued wait latches onto a *future*
+        # record. Codex deemed this "safe" but did not predict the latency cost.
+        # Empirical result: net negative. Reverting to per-frame Event allocation.
+        # Lesson: do NOT pool CUDA events when consumer wait timing is not
+        # deterministic relative to producer record timing.
         self._capture_thread: Optional[threading.Thread] = None
         self._frame_id = 0
         # consume-once tracking: latest() returns each frame_id exactly once.
@@ -580,20 +570,7 @@ class ZEDGpuBridge:
             )
             return rgb_gpu, depth_gpu, None
 
-        # L2a (2026-05-06) — event pool reuse instead of per-frame allocation.
-        # Lazily allocated on first call (saves init cost when CUDA is the
-        # fallback path). enable_timing=False per Codex Q3 (no elapsed_time
-        # callers; timing variant is heavier).
-        if not self._event_pool:
-            self._event_pool = [
-                torch.cuda.Event(enable_timing=False, blocking=False)
-                for _ in range(self._pool_size)
-            ]
-            self._event_pool_idx = 0
-        slot = self._event_pool_idx % self._pool_size
-        self._event_pool_idx += 1
-        event = self._event_pool[slot]
-
+        # L2a REVERTED — back to per-frame allocation (see __init__ comment).
         with torch.cuda.stream(self._h2d_stream):
             rgb_gpu = rgb_pinned.to(self.device, non_blocking=True)
             depth_gpu = (
@@ -601,6 +578,7 @@ class ZEDGpuBridge:
                 if depth_pinned is not None
                 else None
             )
+            event = torch.cuda.Event(enable_timing=True, blocking=False)
             event.record(self._h2d_stream)
         return rgb_gpu, depth_gpu, event
 
