@@ -372,20 +372,36 @@ class StreamedPosePipeline:
         # Runs AFTER t_end / t_gpu_done_ns so constraint CPU overhead does
         # not inflate either e2e or true_e2e_ms.
         world_frame_applied = "R_world_from_cam" in frame.calibration
-        # L_post Phase 0 (2026-05-06) — when ablation is active (PoseResult has
-        # GPU scalars instead of CPU floats), skip constraints (they call
-        # .item() which would re-introduce host sync) and skip tracer scalar
-        # meta (same reason). Final valid is decided in publish path after
-        # the single packed D2H.
-        ablation_active = result.valid_mask_t is not None
+        # L_post Phase 0 (2026-05-06) — when ablation is active, skip constraints
+        # (they call .item() which would re-introduce host sync) and skip
+        # tracer scalar meta (same reason). Final valid is decided in publish
+        # path after the single packed D2H.
+        # Codex Round 7 fix: detect via post.lpost_ablation (canonical flag),
+        # not via field presence. Field-based detection is fragile — future
+        # changes might accidentally populate *_t fields and silently skip
+        # constraints. Strict assert catches mismatch immediately.
+        ablation_active = self.post.lpost_ablation
+        if ablation_active and result.valid_mask_t is None:
+            raise RuntimeError(
+                "GpuPostprocessor.lpost_ablation=True but result.valid_mask_t is None — "
+                "ablation early-return path not taken"
+            )
+        if not ablation_active and result.valid_mask_t is not None:
+            raise RuntimeError(
+                "GpuPostprocessor.lpost_ablation=False but result has valid_mask_t — "
+                "GPU scalar fields populated outside ablation mode"
+            )
         if ablation_active:
             final_result = result
             constraint_ms = 0.0
+            # Codex Round 7 fix: marker values (-1) instead of zero placeholders.
+            # Trace consumers can detect ablation rows by these sentinels and
+            # not misread them as legitimate metric values.
             self.tracer.set_result_meta(
-                valid=False,            # placeholder — real value set after D2H
-                occluded_count=0,       # avoid .item() in ablation hot path
-                depth_invalid_ratio=0.0,
-                box_conf=0.0,
+                valid=False,
+                occluded_count=-1,         # marker: ablation, real value not available
+                depth_invalid_ratio=-1.0,  # marker
+                box_conf=-1.0,             # marker
             )
         else:
             t_constraint = time.perf_counter()

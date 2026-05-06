@@ -578,20 +578,28 @@ def main() -> int:
             if publisher is not None:
                 # Batch D2H — single sync, packed transfer.
                 K = tick.result.kpts_3d_m.shape[0]
-                if args.lpost_ablation and tick.result.valid_mask_t is not None:
-                    # L_post Phase 0 ablation path: post returned GPU scalars
-                    # (box_conf_t, valid_mask_t, depth_invalid_ratio_t) — pack
-                    # them with kpts into a single D2H, then resolve valid /
-                    # box_conf / depth_invalid_ratio on CPU.
+                if args.lpost_ablation:
+                    # L_post Phase 0 ablation path: post returned GPU scalars.
+                    # Codex Round 7 fix: assert tensor fields present (flag/field
+                    # mismatch is a programming error, not silent fallback).
+                    if tick.result.valid_mask_t is None:
+                        raise RuntimeError(
+                            "--lpost-ablation set but PoseResult.valid_mask_t is None — "
+                            "GpuPostprocessor not in ablation mode?"
+                        )
+                    # Codex Round 7 fix: explicit FP32 cast on every cat input.
+                    # TRT output dtype could be FP16 in some configurations; mixing
+                    # dtypes silently relies on PyTorch promotion rules — risky
+                    # for real-time deterministic behavior.
                     flat_gpu = torch.cat([
-                        tick.result.kpts_3d_m.reshape(-1),                   # K*3
-                        tick.result.kpt_conf.reshape(-1),                    # K
-                        tick.result.kpts_2d_px.reshape(-1),                  # K*2
-                        tick.result.box_conf_t.reshape(-1),                  # 1
-                        tick.result.valid_mask_t.float().reshape(-1),        # 1
-                        tick.result.depth_invalid_ratio_t.reshape(-1),       # 1
+                        tick.result.kpts_3d_m.float().reshape(-1),                   # K*3
+                        tick.result.kpt_conf.float().reshape(-1),                    # K
+                        tick.result.kpts_2d_px.float().reshape(-1),                  # K*2
+                        tick.result.box_conf_t.float().reshape(-1),                  # 1
+                        tick.result.valid_mask_t.to(dtype=torch.float32).reshape(-1),# 1
+                        tick.result.depth_invalid_ratio_t.float().reshape(-1),       # 1
                     ], dim=0)
-                    flat = flat_gpu.detach().to("cpu", non_blocking=False).numpy().astype(np.float32)
+                    flat = flat_gpu.detach().cpu().numpy().astype(np.float32, copy=False)
                     kpts_3d = flat[:K*3].reshape(K, 3)
                     kpt_conf = flat[K*3:K*3 + K]
                     kpts_2d = flat[K*3 + K:K*3 + K + K*2].reshape(K, 2)
