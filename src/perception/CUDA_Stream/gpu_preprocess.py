@@ -77,13 +77,14 @@ class GpuPreprocessor:
                 f"expected (H,W,3) RGB or (H,W,4) BGRA, got {tuple(rgb_u8.shape)}"
             )
 
-        # L1 (2026-05-06): BGRA → RGB on GPU. Cheap: index_select / flip on
-        # the channel dim runs in microseconds for SVGA-sized tensors.
+        # L1 (2026-05-06): BGRA → RGB on GPU. Use fancy indexing [2,1,0] which
+        # selects channels R(=2), G(=1), B(=0) — alpha auto-drops + reverse in
+        # one op + returns contiguous tensor (no negative-stride view bugs).
+        # Tested: `flip(-1)` produced a negative-stride view that broke after
+        # subsequent permute().to(dtype) on PyTorch 2.10 — output channels were
+        # corrupted. fancy indexing avoids that path entirely.
         if rgb_u8.shape[2] == 4:
-            # BGRA → BGR (drop alpha): [..., :3]. BGR → RGB: flip last dim.
-            # `flip(-1)` returns a view with reversed strides; subsequent ops
-            # (permute/interpolate) materialize contiguous copies as needed.
-            rgb_u8 = rgb_u8[..., :3].flip(-1)
+            rgb_u8 = rgb_u8[..., [2, 1, 0]]
 
         H, W, _ = rgb_u8.shape
         scale = min(self.imgsz / H, self.imgsz / W)
