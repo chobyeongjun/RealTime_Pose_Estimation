@@ -120,7 +120,13 @@ class StreamedPosePipeline:
         constraints: Optional[ConstraintStack] = None,
         tracer: Optional[PipelineTracer] = None,
         watchdog: Optional[Any] = None,
+        frame_overlap: bool = False,
     ) -> None:
+        # Phase 4 D1 (Codex R3) — flag-based ablation:
+        #   False (default): existing sequential cycle (_run_sequential)
+        #   True : token-aware overlap cycle (_run_with_overlap, helper 4개 사용)
+        # CLI flag: ``--frame-overlap`` (run_stream_demo.py).
+        self._frame_overlap_enabled = frame_overlap
         self.bridge = bridge
         self.runner = runner
         self.pre = preprocessor
@@ -404,7 +410,16 @@ class StreamedPosePipeline:
         )
 
     def run_overlapped_step(self) -> Optional[PipelineTick]:
-        """Consume the latest ZED frame, advance streams, return last finished."""
+        """Consume the latest ZED frame, advance streams, return last finished.
+
+        Phase 4 D1 (Codex R3) — flag-based dispatch:
+          self._frame_overlap_enabled=True  → token-aware overlap cycle
+          self._frame_overlap_enabled=False → existing sequential cycle (이하)
+        """
+        if self._frame_overlap_enabled:
+            return self._run_with_overlap()
+
+        # ---- 기존 sequential cycle (P1D1-D3 그대로, flag OFF default) ----
         frame = self.bridge.latest(timeout=0.5)
         if frame is None:
             return None
@@ -621,6 +636,27 @@ class StreamedPosePipeline:
             valid=True,
             depth_invalid_ratio=result.depth_invalid_ratio,
         )
+
+    # ------------------------------------------------------------------
+    # Phase 4 D1 — token-aware overlap dispatch (Codex R3)
+    # ------------------------------------------------------------------
+    def _run_with_overlap(self) -> Optional[PipelineTick]:
+        """Token-aware frame overlap cycle (Codex R3 Q7).
+
+        매 step:
+          1) retire_ready(block=False): 이전 token 의 post 가 ready 면 publish
+          2) bridge.latest(): 새 frame (단 _pending 가 ring_size 만큼이면 backpressure)
+          3) submit_token(frame): pre + inf + D2D copy + post (background)
+          4) tick or retire_ready(block=False) 반환
+        """
+        tick = self._retire_ready(block=False)
+        frame = self.bridge.latest(timeout=0.0 if tick is not None else 0.5)
+        if frame is not None:
+            # backpressure: ring_size 가 in-flight 한도 — 초과 시 retire(block=True)
+            if len(self._pending) >= self._output_ring_size:
+                return tick or self._retire_ready(block=True)
+            self._submit_token(frame)
+        return tick or self._retire_ready(block=False)
 
     # ------------------------------------------------------------------
     # Phase 4 D1 — frame overlap helpers (Codex R3, currently UNUSED)
