@@ -41,12 +41,25 @@ run_case() {
     shift
     local extra="$*"
     local logfile="${OUTDIR}/${label}.log"
+    local rc=0
     echo "▶ Running case: ${label}  (extra: ${extra})"
     bash "$ROOT/src/perception/CUDA_Stream/launch_clean.sh" 20 $extra \
-        2>&1 | tail -200 > "$logfile" || true
+        2>&1 | tail -200 > "$logfile" || rc=$?
+
+    # Codex γ review fix: || true 가 모든 fail 을 silent 통과 → ablation 측정
+    # 가 fake-success. 변경: failure record + final metrics 검사 + summary 에 mark.
+    # case isolation 위해 exit 안 함 (다음 case 계속), 단 log 에 명시.
+    if [ "$rc" -ne 0 ] || ! grep -q "true_e2e" "$logfile"; then
+        echo "  ⚠️ FAILED (rc=${rc}, no final metrics)"
+        echo "FAILED rc=${rc}" >> "$logfile"
+        FAILED_CASES+=("${label}")
+    fi
     echo "  → ${logfile}"
     echo ""
 }
+
+# 실패 case 추적
+FAILED_CASES=()
 
 case "$ROUND" in
     fps)
@@ -100,6 +113,18 @@ case "$ROUND" in
         exit 1
         ;;
 esac
+
+echo ""
+# Codex γ review fix: 실패 case 명시.
+if [ "${#FAILED_CASES[@]}" -ne 0 ]; then
+    echo "⚠️ ============================================================"
+    echo "⚠️ FAILED CASES (${#FAILED_CASES[@]}/${#FAILED_CASES[@]}):"
+    for c in "${FAILED_CASES[@]}"; do
+        echo "⚠️   - ${c}"
+    done
+    echo "⚠️ Sweep result PARTIAL — check $logfile for each."
+    echo "⚠️ ============================================================"
+fi
 
 echo ""
 echo "=== Comparison table ==="

@@ -231,7 +231,15 @@ class ZEDGpuBridge:
         self._image_mats_gpu: list[Any] = []
         self._depth_mats_gpu: list[Any] = []
         self._gpu_mat_events: list[Optional[Any]] = []
+        # Codex γ review fix: CuPy/DLPack ref lifetime 보장.
+        # 같은 slot 의 이전 round 의 (rgb_cu, rgb_view, depth_cu, depth_view)
+        # 가 event.synchronize() 끝까지 alive — wrapper destructor race 방지.
+        self._gpu_mat_refs: list[Optional[tuple]] = []
         self._gpu_mat_idx = 0
+        # Codex γ review fix: capture loop fatal error 를 main thread 로 surface.
+        # 기존: capture loop except 가 LOGGER.error + sleep + 계속 돌음 → silent fail.
+        # 변경: error 저장 + stop_event 설정. latest() 가 raise.
+        self._capture_error: Optional[BaseException] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -339,6 +347,7 @@ class ZEDGpuBridge:
                 else []
             )
             self._gpu_mat_events = [None for _ in range(self._pool_size)]
+            self._gpu_mat_refs = [None for _ in range(self._pool_size)]
 
         # Build the static rotation R that maps camera-frame 3D points
         # into a gravity-aligned world frame (world +Y == down). Three
@@ -489,6 +498,22 @@ class ZEDGpuBridge:
         if self._capture_thread is not None:
             self._capture_thread.join(timeout=2.0)
             self._capture_thread = None
+        # Codex γ review fix: ZED close 전 outstanding D2D snapshot 동기화.
+        # _gpu_mat_events / refs 가 in-flight 면 ZED close 가 GPU buffer free
+        # → race / illegal memory access. h2d_stream 까지 sync 후 close.
+        if torch.cuda.is_available() and self._h2d_stream is not None:
+            try:
+                self._h2d_stream.synchronize()
+            except Exception:
+                pass
+        for event in self._gpu_mat_events:
+            if event is not None:
+                try:
+                    event.synchronize()
+                except Exception:
+                    pass
+        # refs reset (CuPy/DLPack wrapper destructor 자유롭게 GC 가능)
+        self._gpu_mat_refs = [None for _ in self._gpu_mat_refs]
         if self._zed is not None:
             self._zed.close()
             self._zed = None
@@ -505,9 +530,15 @@ class ZEDGpuBridge:
                 if frame is not None:
                     with self._frames_lock:
                         self._frames.append(frame)
-            except Exception as err:  # pragma: no cover — keep thread alive
-                LOGGER.error("capture loop error: %s", err)
-                time.sleep(0.01)
+            except Exception as err:
+                # Codex γ review fix: interop / runtime failure FATAL.
+                # 기존: LOGGER.error + sleep + continue → silent fail (ablation
+                # 측정이 fake-success 처럼 통과). 변경: error 저장 + stop_event
+                # set + return → main thread 의 latest() 가 raise.
+                self._capture_error = err
+                self._stop_event.set()
+                LOGGER.exception("capture loop FATAL — stopping")
+                return
 
     def _grab_one(self) -> Optional[ZEDFrame]:
         if self._using_webcam:
@@ -696,6 +727,10 @@ class ZEDGpuBridge:
         prev = self._gpu_mat_events[slot]
         if prev is not None:
             prev.synchronize()
+            # Codex γ review fix: prev refs 도 release. wrapper destructor 가
+            # event sync 후에 GC 되도록 보장 (lifetime ambiguity 제거).
+            self._gpu_mat_events[slot] = None
+            self._gpu_mat_refs[slot] = None
 
         image_mat = self._image_mats_gpu[slot]
         depth_mat = self._depth_mats_gpu[slot] if self.enable_depth else None
@@ -722,10 +757,14 @@ class ZEDGpuBridge:
             cap["getdata_depth_ms"] = 0.0
 
         # CuPy ndarray (zero-copy of ZED GPU buffer) → DLPack view → D2D snapshot.
+        # Codex γ review fix: refs 보관 — event sync 까지 alive 유지. wrapper
+        # destructor 가 D2D 끝나기 전 GC 시 race 가능성 제거.
+        refs: list = []
         t0 = time.perf_counter()
         with torch.cuda.stream(self._h2d_stream):
             rgb_cu = image_mat.get_data(sl.MEM.GPU, deep_copy=False)
             rgb_view = torch.utils.dlpack.from_dlpack(rgb_cu)
+            refs.extend([rgb_cu, rgb_view])
             if (
                 rgb_view.dtype != torch.uint8
                 or rgb_view.ndim != 3
@@ -745,6 +784,7 @@ class ZEDGpuBridge:
             if self.enable_depth and depth_mat is not None:
                 depth_cu = depth_mat.get_data(sl.MEM.GPU, deep_copy=False)
                 depth_view = torch.utils.dlpack.from_dlpack(depth_cu)
+                refs.extend([depth_cu, depth_view])
                 if depth_view.ndim == 3 and depth_view.shape[-1] == 1:
                     depth_view = depth_view[..., 0]
                 if depth_view.dtype != torch.float32:
@@ -762,6 +802,10 @@ class ZEDGpuBridge:
 
         cap["dlpack_d2d_enqueue_ms"] = (time.perf_counter() - t0) * 1e3
         self._gpu_mat_events[slot] = event
+        # Codex γ review fix: refs (CuPy ndarray + DLPack view) 를 event 와
+        # 같은 slot 에 보관. 다음 round 의 prev.synchronize() 후 release —
+        # D2D copy 가 완료되어 source memory 가 더 이상 필요 없을 때 GC.
+        self._gpu_mat_refs[slot] = tuple(refs)
         return rgb_gpu, depth_gpu, event
 
     # ------------------------------------------------------------------
@@ -865,8 +909,16 @@ class ZEDGpuBridge:
         With deque(maxlen=2), the bridge may evict frames between pickups
         (intentional — we always serve the freshest available).
         """
+        # Codex γ review fix: capture loop fatal error 가 발생했으면 main thread
+        # 로 surface — silent zero-frame loop 방지. ablation 측정 시 fake success
+        # 처럼 보이는 경우를 catch.
+        if self._capture_error is not None:
+            raise RuntimeError("ZED capture loop failed") from self._capture_error
         t_end = time.monotonic() + timeout
         while time.monotonic() < t_end:
+            # Loop 안에서도 fatal 발생 시 즉시 surface (long timeout 회피).
+            if self._capture_error is not None:
+                raise RuntimeError("ZED capture loop failed") from self._capture_error
             with self._frames_lock:
                 if self._frames:
                     frame = self._frames[-1]
