@@ -75,12 +75,12 @@ case "$ROUND" in
         run_case "fill"     --sensing-mode FILL
         ;;
     combinations)
-        # Phase 4 D1 + Phase 5 D1 (Codex R3+R4) — 8 조합 ablation.
+        # Phase 4 D1 + Phase 5 D1 + γ (Codex R3+R4+R5) — 12 조합 ablation.
         # 어느 flag 조합이 진짜 -ms 효과 있는지 결정적 격리.
-        # Expected (Codex R4):
-        #   baseline ~65 / overlap only ~65 / async only ~62 /
-        #   ★ overlap+async ~42-50 / lpost ~55 / 모두 ON ~42-50
-        # 측정 시간: 8 case × 25s ≈ 4분 (각 case duration 20s, 마진 5s)
+        # Expected (Codex R5):
+        #   00_baseline ~65 / 03_overlap_async ~42-50 / 07_all_lever_old ~42-50 /
+        #   08_interop_only ~60 (-5 bridge) / ★ 11_all_lever_new ~35-45 (best)
+        # 측정 시간: 12 case × 25s ≈ 5분
         run_case "00_baseline"               ""
         run_case "01_overlap_only"           --frame-overlap
         run_case "02_async_only"             --post-async
@@ -88,7 +88,12 @@ case "$ROUND" in
         run_case "04_lpost_only"             --lpost-ablation
         run_case "05_overlap_lpost"          --frame-overlap --lpost-ablation
         run_case "06_async_lpost"            --post-async --lpost-ablation
-        run_case "07_all_on"                 --frame-overlap --post-async --lpost-ablation
+        run_case "07_all_lever_old"          --frame-overlap --post-async --lpost-ablation
+        # γ Phase (Codex R5) — ZED CUDA interop 추가 4 case
+        run_case "08_interop_only"           --zed-cuda-interop
+        run_case "09_interop_overlap"        --zed-cuda-interop --frame-overlap
+        run_case "10_interop_async"          --zed-cuda-interop --post-async
+        run_case "11_all_lever_new"          --zed-cuda-interop --frame-overlap --post-async --lpost-ablation
         ;;
     *)
         echo "ERROR: unknown round '${ROUND}'. Use {fps|exposure|depth|sensing|combinations}"

@@ -224,6 +224,15 @@ class ZEDGpuBridge:
         self._depth_pool: list[torch.Tensor] = []
         self._pool_idx = 0
 
+        # γ Phase (Codex R5) — shared_ctx (ZED MEM::GPU + DLPack) state.
+        # ZED 가 grab() 마다 Mat backing store 재사용 → naked DLPack view 를
+        # pipeline 에 넘기면 다음 frame 으로 덮임. D2D snapshot 으로 close.
+        # per-slot Mat (pool) + per-slot torch.cuda.Event 로 slot reuse 동기화.
+        self._image_mats_gpu: list[Any] = []
+        self._depth_mats_gpu: list[Any] = []
+        self._gpu_mat_events: list[Optional[Any]] = []
+        self._gpu_mat_idx = 0
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -249,22 +258,31 @@ class ZEDGpuBridge:
         else:
             init.depth_mode = sl.DEPTH_MODE.NONE
 
-        if self.mode == "shared_ctx":
-            # γ Phase (2026-05-08, Codex R10 verified ZED ctx == PyTorch ctx).
-            # shared_ctx path 는 _grab_one + _upload 의 ZED MEM::GPU + DLPack
-            # zero-copy 구현 필요. Codex R5 응답 후 γ.C-E 통합 commit 시 활성.
-            # 현재 STUB — flag --zed-cuda-interop ON 호출 시 NotImplementedError.
-            raise NotImplementedError(
-                "γ ZED CUDA interop (shared_ctx path) STUB. "
-                "Codex R5 응답 후 _grab_one + _upload 의 MEM::GPU + DLPack "
-                "implementation 완료 시 활성. 현재는 --zed-cuda-interop OFF "
-                "(default) 만 사용 가능."
-            )
-        if self.mode not in ("copy_async",):
+        # γ Phase (Codex R5) — mode 검증 + dependency check.
+        # shared_ctx path = ZED MEM::GPU + CuPy/DLPack zero-copy view → torch
+        # D2D snapshot. raw view 를 pipeline 에 넘기면 다음 grab() 가 backing
+        # store 재사용 → race. snapshot 이 race 닫음.
+        if self.mode not in ("copy_async", "shared_ctx"):
             raise ValueError(
                 f"unsupported ZED mode={self.mode!r}; only 'copy_async' / "
-                "'shared_ctx' (γ STUB) supported."
+                "'shared_ctx' supported."
             )
+
+        if self.mode == "shared_ctx":
+            if not torch.cuda.is_available():
+                raise RuntimeError("--zed-cuda-interop requires CUDA")
+            if not hasattr(sl, "MEM") or not hasattr(sl.MEM, "GPU"):
+                raise RuntimeError(
+                    "--zed-cuda-interop requires PyZED with sl.MEM.GPU "
+                    "(ZED SDK 4.x+ Python binding)"
+                )
+            try:
+                import cupy  # noqa: F401
+            except ImportError as exc:
+                raise RuntimeError(
+                    "--zed-cuda-interop requires CuPy matching Jetson CUDA. "
+                    "Install: pip3 install cupy-cuda12x (or matching wheel)"
+                ) from exc
 
         self._zed = sl.Camera()
         status = self._zed.open(init)
@@ -307,9 +325,20 @@ class ZEDGpuBridge:
         cy = cam_info.calibration_parameters.left_cam.cy
         self._calibration = {"fx": fx, "fy": fy, "cx": cx, "cy": cy}
 
-        # reusable host buffers
+        # reusable host buffers (copy_async path) + GPU Mat pool (shared_ctx)
         self._image_mat = sl.Mat()
         self._depth_mat = sl.Mat()
+
+        # γ Phase — per-slot GPU Mat pool. ZED retrieve 시 backing store 재사용
+        # 위험 → slot rotation + per-slot Event 로 race 닫기.
+        if self.mode == "shared_ctx":
+            self._image_mats_gpu = [sl.Mat() for _ in range(self._pool_size)]
+            self._depth_mats_gpu = (
+                [sl.Mat() for _ in range(self._pool_size)]
+                if self.enable_depth
+                else []
+            )
+            self._gpu_mat_events = [None for _ in range(self._pool_size)]
 
         # Build the static rotation R that maps camera-frame 3D points
         # into a gravity-aligned world frame (world +Y == down). Three
@@ -563,37 +592,42 @@ class ZEDGpuBridge:
             except Exception as err:
                 LOGGER.warning("[zed_ts] diag failed: %s", err)
 
-        t0 = time.perf_counter()
-        self._zed.retrieve_image(self._image_mat, sl.VIEW.LEFT)
-        cap["retrieve_rgb_ms"] = (time.perf_counter() - t0) * 1e3
-
-        t0 = time.perf_counter()
-        # IMPORTANT: skiro-learnings — always copy=True to avoid race with
-        # next grab(); the copy cost at SVGA is ~0.5ms.
-        # L1 (2026-05-06): keep BGRA 4-channel as-is. The previous
-        # `np.ascontiguousarray(bgra[:,:,:3][:,:,::-1])` was costing ~4ms
-        # (A11 measurement 2026-05-06: getdata_rgb 0.36ms in raw bench vs
-        # 4.76ms here). GPU preproc now handles BGR→RGB channel select +
-        # alpha drop on the GPU side at sub-microsecond cost.
-        bgra_host = self._image_mat.get_data(deep_copy=True)
-        cap["getdata_rgb_ms"] = (time.perf_counter() - t0) * 1e3
-
-        t0 = time.perf_counter()
-        rgb_pinned = self._get_pinned_rgb(bgra_host)   # BGRA 4ch (was RGB 3ch pre-L1)
-        cap["pinned_rgb_ms"] = (time.perf_counter() - t0) * 1e3
-
-        depth_pinned = None
-        if self.enable_depth:
+        # γ Phase (Codex R5) — mode 분기.
+        if self.mode == "shared_ctx":
+            rgb_gpu, depth_gpu, ready_event = self._retrieve_gpu_dlpack(cap)
+        else:
+            # copy_async path (기존 변경 없음).
             t0 = time.perf_counter()
-            self._zed.retrieve_measure(self._depth_mat, sl.MEASURE.DEPTH)
-            cap["retrieve_depth_ms"] = (time.perf_counter() - t0) * 1e3
+            self._zed.retrieve_image(self._image_mat, sl.VIEW.LEFT)
+            cap["retrieve_rgb_ms"] = (time.perf_counter() - t0) * 1e3
 
             t0 = time.perf_counter()
-            depth_host = self._depth_mat.get_data(deep_copy=True)
-            depth_pinned = self._get_pinned_depth(depth_host)
-            cap["getdata_depth_ms"] = (time.perf_counter() - t0) * 1e3
+            # IMPORTANT: skiro-learnings — always copy=True to avoid race with
+            # next grab(); the copy cost at SVGA is ~0.5ms.
+            # L1 (2026-05-06): keep BGRA 4-channel as-is. The previous
+            # `np.ascontiguousarray(bgra[:,:,:3][:,:,::-1])` was costing ~4ms
+            # (A11 measurement 2026-05-06: getdata_rgb 0.36ms in raw bench vs
+            # 4.76ms here). GPU preproc now handles BGR→RGB channel select +
+            # alpha drop on the GPU side at sub-microsecond cost.
+            bgra_host = self._image_mat.get_data(deep_copy=True)
+            cap["getdata_rgb_ms"] = (time.perf_counter() - t0) * 1e3
 
-        rgb_gpu, depth_gpu, ready_event = self._upload(rgb_pinned, depth_pinned)
+            t0 = time.perf_counter()
+            rgb_pinned = self._get_pinned_rgb(bgra_host)   # BGRA 4ch
+            cap["pinned_rgb_ms"] = (time.perf_counter() - t0) * 1e3
+
+            depth_pinned = None
+            if self.enable_depth:
+                t0 = time.perf_counter()
+                self._zed.retrieve_measure(self._depth_mat, sl.MEASURE.DEPTH)
+                cap["retrieve_depth_ms"] = (time.perf_counter() - t0) * 1e3
+
+                t0 = time.perf_counter()
+                depth_host = self._depth_mat.get_data(deep_copy=True)
+                depth_pinned = self._get_pinned_depth(depth_host)
+                cap["getdata_depth_ms"] = (time.perf_counter() - t0) * 1e3
+
+            rgb_gpu, depth_gpu, ready_event = self._upload(rgb_pinned, depth_pinned)
 
         # ready_ns = right after H2D was LAUNCHED (cudaMemcpyAsync queued + event
         # recorded). The actual GPU completion is signalled by ready_event; CPU
@@ -627,6 +661,108 @@ class ZEDGpuBridge:
             bridge_start_ns=bridge_start_ns,
             ready_ns=ready_ns,
         )
+
+    # ------------------------------------------------------------------
+    # γ Phase (Codex R5) — ZED MEM::GPU + CuPy/DLPack zero-copy view + D2D snapshot
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _check_zed_status(status: Any, op: str) -> None:
+        """ZED API call의 ERROR_CODE check — fail fast (silent fallback 금지)."""
+        if status is not None and status != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError(f"{op} failed: {status}")
+
+    def _retrieve_gpu_dlpack(
+        self, cap: dict
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], "torch.cuda.Event"]:
+        """ZED retrieve → MEM::GPU → CuPy ndarray → DLPack view → torch D2D snapshot.
+
+        라이프사이클:
+          - per-slot Mat (self._image_mats_gpu[slot]): ZED 가 backing store 재사용,
+            naked view 를 pipeline 에 넘기면 다음 grab() 가 덮어씀
+          - DLPack from_dlpack: zero-copy view of CuPy buffer
+          - torch.empty + copy_(non_blocking=True): D2D snapshot 으로 race close
+          - per-slot Event: 다음 round 에서 같은 slot 재사용 전 prev event sync
+
+        ready_event 의미: copy_async 의 H2D 완료 → shared_ctx 의 D2D snapshot 완료.
+        pipeline.py 의 ``pre.stream.wait_event(frame.ready_event)`` 는 그대로 동작.
+        """
+        if self._h2d_stream is None:
+            self._h2d_stream = torch.cuda.Stream(device=self.device)
+
+        slot = self._gpu_mat_idx % self._pool_size
+        self._gpu_mat_idx += 1
+
+        # prev round 에서 이 slot 사용한 D2D 가 끝났는지 확인 — slot Mat 재사용 안전.
+        prev = self._gpu_mat_events[slot]
+        if prev is not None:
+            prev.synchronize()
+
+        image_mat = self._image_mats_gpu[slot]
+        depth_mat = self._depth_mats_gpu[slot] if self.enable_depth else None
+
+        # retrieve to GPU (ZED owns memory, host transfer 없음)
+        t0 = time.perf_counter()
+        self._check_zed_status(
+            self._zed.retrieve_image(image_mat, sl.VIEW.LEFT, sl.MEM.GPU),
+            "retrieve_image MEM.GPU",
+        )
+        cap["retrieve_rgb_gpu_ms"] = (time.perf_counter() - t0) * 1e3
+        cap["retrieve_rgb_ms"] = cap["retrieve_rgb_gpu_ms"]   # 호환 (기존 metric)
+        cap["getdata_rgb_ms"] = 0.0
+        cap["pinned_rgb_ms"] = 0.0
+
+        if self.enable_depth and depth_mat is not None:
+            t0 = time.perf_counter()
+            self._check_zed_status(
+                self._zed.retrieve_measure(depth_mat, sl.MEASURE.DEPTH, sl.MEM.GPU),
+                "retrieve_measure DEPTH MEM.GPU",
+            )
+            cap["retrieve_depth_gpu_ms"] = (time.perf_counter() - t0) * 1e3
+            cap["retrieve_depth_ms"] = cap["retrieve_depth_gpu_ms"]
+            cap["getdata_depth_ms"] = 0.0
+
+        # CuPy ndarray (zero-copy of ZED GPU buffer) → DLPack view → D2D snapshot.
+        t0 = time.perf_counter()
+        with torch.cuda.stream(self._h2d_stream):
+            rgb_cu = image_mat.get_data(sl.MEM.GPU, deep_copy=False)
+            rgb_view = torch.utils.dlpack.from_dlpack(rgb_cu)
+            if (
+                rgb_view.dtype != torch.uint8
+                or rgb_view.ndim != 3
+                or rgb_view.shape[-1] != 4
+            ):
+                raise RuntimeError(
+                    f"unexpected ZED RGB shape/dtype: {rgb_view.shape} {rgb_view.dtype}"
+                )
+            # owned snapshot — race close (다음 grab 이 backing store 덮어써도 안전)
+            rgb_gpu = torch.empty(
+                tuple(rgb_view.shape), dtype=torch.uint8, device=self.device
+            )
+            rgb_gpu.copy_(rgb_view, non_blocking=True)
+            rgb_gpu.record_stream(self._h2d_stream)
+
+            depth_gpu = None
+            if self.enable_depth and depth_mat is not None:
+                depth_cu = depth_mat.get_data(sl.MEM.GPU, deep_copy=False)
+                depth_view = torch.utils.dlpack.from_dlpack(depth_cu)
+                if depth_view.ndim == 3 and depth_view.shape[-1] == 1:
+                    depth_view = depth_view[..., 0]
+                if depth_view.dtype != torch.float32:
+                    raise RuntimeError(
+                        f"unexpected ZED depth dtype: {depth_view.dtype}"
+                    )
+                depth_gpu = torch.empty(
+                    tuple(depth_view.shape), dtype=torch.float32, device=self.device
+                )
+                depth_gpu.copy_(depth_view, non_blocking=True)
+                depth_gpu.record_stream(self._h2d_stream)
+
+            event = torch.cuda.Event(enable_timing=False, blocking=False)
+            event.record(self._h2d_stream)
+
+        cap["dlpack_d2d_enqueue_ms"] = (time.perf_counter() - t0) * 1e3
+        self._gpu_mat_events[slot] = event
+        return rgb_gpu, depth_gpu, event
 
     # ------------------------------------------------------------------
     # Pinned buffer pool — avoids per-frame pin_memory() spike
