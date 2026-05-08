@@ -163,6 +163,12 @@ def parse_args() -> argparse.Namespace:
              "post() 의 .cpu() 제거, scalar D2H async + finalize_async() 가 retire "
              "시점에 .tolist() + sticky/EMA commit. --lpost-ablation 우선.",
     )
+    ap.add_argument(
+        "--zed-cuda-interop", action="store_true",
+        help="γ Phase — ZED CUDA interop (shared_ctx path). "
+             "ZED MEM::GPU + DLPack zero-copy. bridge_proc 14.4→8-10ms 추정. "
+             "현재 STUB — Codex R5 응답 후 _grab_one + _upload 구현 시 활성.",
+    )
     return ap.parse_args()
 
 
@@ -329,6 +335,7 @@ def main() -> int:
         exposure_us=args.exposure_us,             # Plan v7 R1
         sensing_mode=args.sensing_mode,           # Plan v7 R3
         diag_zed_lag=args.diag_zed_lag,           # Plan v7 R0
+        zed_cuda_interop=args.zed_cuda_interop,   # γ Phase (STUB)
     )
     bridge.open()
     bridge.start()

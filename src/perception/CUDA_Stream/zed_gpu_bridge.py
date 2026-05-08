@@ -158,6 +158,11 @@ class ZEDGpuBridge:
         exposure_us: Optional[int] = None,  # None=AUTO, 양수=MANUAL microseconds
         sensing_mode: str = "STANDARD",     # STANDARD | FILL
         diag_zed_lag: bool = False,         # warmup 5 frames timestamp 다층 print
+        # γ Phase (2026-05-08) — ZED CUDA interop ablation flag.
+        # OFF (default): copy_async path (현재 H2D + pinned pool)
+        # ON: shared_ctx path (ZED MEM::GPU + DLPack zero-copy)
+        # Codex R10 verified: ZED ctx == PyTorch ctx → DLPack 가능.
+        zed_cuda_interop: bool = False,
     ) -> None:
         self.device = device or torch.device("cuda:0")
         self.resolution = resolution
@@ -171,6 +176,12 @@ class ZEDGpuBridge:
         self.exposure_us = exposure_us
         self.sensing_mode = sensing_mode.upper()
         self.diag_zed_lag = diag_zed_lag
+        # γ Phase — ZED CUDA interop flag. ON 시 self.mode 강제 'shared_ctx'.
+        # 단 Codex R5 응답 후 _grab_one + _upload 의 shared_ctx path 구현 완료.
+        # 그 전에 flag ON 호출 시 NotImplementedError raise (silent broken 방지).
+        self.zed_cuda_interop = zed_cuda_interop
+        if self.zed_cuda_interop:
+            self.mode = "shared_ctx"
 
         self._frames: Deque[ZEDFrame] = deque(maxlen=queue_size)
         self._frames_lock = threading.Lock()
@@ -238,14 +249,21 @@ class ZEDGpuBridge:
         else:
             init.depth_mode = sl.DEPTH_MODE.NONE
 
+        if self.mode == "shared_ctx":
+            # γ Phase (2026-05-08, Codex R10 verified ZED ctx == PyTorch ctx).
+            # shared_ctx path 는 _grab_one + _upload 의 ZED MEM::GPU + DLPack
+            # zero-copy 구현 필요. Codex R5 응답 후 γ.C-E 통합 commit 시 활성.
+            # 현재 STUB — flag --zed-cuda-interop ON 호출 시 NotImplementedError.
+            raise NotImplementedError(
+                "γ ZED CUDA interop (shared_ctx path) STUB. "
+                "Codex R5 응답 후 _grab_one + _upload 의 MEM::GPU + DLPack "
+                "implementation 완료 시 활성. 현재는 --zed-cuda-interop OFF "
+                "(default) 만 사용 가능."
+            )
         if self.mode not in ("copy_async",):
-            # sdk_cuda_ctx sharing would need a CUcontext pointer that
-            # PyTorch doesn't expose. We keep the option open for future
-            # ZED SDK + cuda-python integration but error loudly so
-            # callers don't silently get the wrong path.
             raise ValueError(
-                f"unsupported ZED mode={self.mode!r}; only 'copy_async' is "
-                "implemented (see zed-python-api issue #35)"
+                f"unsupported ZED mode={self.mode!r}; only 'copy_async' / "
+                "'shared_ctx' (γ STUB) supported."
             )
 
         self._zed = sl.Camera()
