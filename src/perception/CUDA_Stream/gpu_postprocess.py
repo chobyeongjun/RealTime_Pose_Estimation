@@ -50,6 +50,13 @@ class PoseResult:
     box_conf_t: Optional[torch.Tensor] = None        # (), float
     valid_mask_t: Optional[torch.Tensor] = None      # (), bool
     depth_invalid_ratio_t: Optional[torch.Tensor] = None  # (), float
+    # Phase 5 D1 (Codex R4) — `--post-async` flag mode 의 deferred branch state.
+    # post() 에서 3 scalar (box_conf, num_low_conf, invalid_ratio) 를 token-owned
+    # pinned buffer 로 D2H *async* copy. retire 시점에 finalize_async() 가
+    # scalar_host.tolist() 로 branch + sticky/EMA commit. flag OFF 시 모두 None.
+    scalar_host: Optional[torch.Tensor] = None       # (3,) pinned CPU, async D2H 대상
+    num_low_conf_t: Optional[torch.Tensor] = None    # (), float — finalize_async 에서 비교
+    post_async_pending: bool = False                  # True 시 finalize_async 호출 필요
 
 
 class OneEuroFilter1D:
@@ -118,6 +125,7 @@ class GpuPostprocessor:
         use_filter: bool = False,        # ⚠ skiro-learnings: keep OFF by default
         filter_params: Optional[dict] = None,
         lpost_ablation: bool = False,   # L_post (2026-05-06) — see __call__
+        post_async: bool = False,        # Phase 5 D1 (Codex R4) — async D2H + retire branch
     ) -> None:
         self.schema = schema
         self.K = schema.num_keypoints
@@ -163,6 +171,9 @@ class GpuPostprocessor:
         self.device = device or torch.device("cuda:0")
         self.use_filter = use_filter
         self.lpost_ablation = lpost_ablation
+        # Phase 5 D1 (Codex R4) — async D2H + retire branch.
+        # lpost_ablation 우선 (둘 다 ON 시 lpost_ablation path 가 winners).
+        self.post_async = post_async
         self._filter: Optional[OneEuroFilter1D] = None
         if use_filter:
             fp = filter_params or {}
@@ -213,7 +224,11 @@ class GpuPostprocessor:
         calibration: dict,
         stream: torch.cuda.Stream,
         ts_s: float,
+        scalar_host: Optional[torch.Tensor] = None,
     ) -> PoseResult:
+        # Phase 5 D1 (Codex R4) — scalar_host = token-owned pinned (3,) buffer.
+        # post_async ON 시 3 scalar (box_conf, num_low_conf, invalid_ratio) D2H
+        # async copy 대상. flag OFF / lpost_ablation 시 None — 무시.
         if raw_output.ndim != 3 or raw_output.shape[0] != 1:
             raise ValueError(
                 f"raw_output must be (1,N,L), got {tuple(raw_output.shape)}"
@@ -305,6 +320,52 @@ class GpuPostprocessor:
                     depth_invalid_ratio_t=invalid_ratio_t,
                 )
 
+            # Phase 5 D1 (Codex R4) — `--post-async` path: D2H 를 *async* 로 enqueue,
+            # state commit (sticky/EMA/branch decision) 은 retire 시점 finalize_async()
+            # 에서. submit_token() 안에서 host sync 없음 → frame_overlap 의 진짜 효과
+            # 활성. flag OFF (default) 시 기존 standard path.
+            if self.post_async:
+                if scalar_host is None:
+                    raise RuntimeError(
+                        "post_async=True 요구 token-owned pinned scalar_host buffer. "
+                        "PipelineToken.post_scalar_host 가 _make_token 에서 할당되어야."
+                    )
+                scalars_gpu = torch.stack([
+                    box_conf_t.float(),
+                    num_low_conf_t,
+                    invalid_ratio_t.float(),
+                ])
+                # async D2H — same post stream. retire 시점 post_done.query()=True
+                # 면 D2H 도 끝 (별도 event 불필요).
+                scalar_host.copy_(scalars_gpu, non_blocking=True)
+                valid_mask_t = (
+                    (box_conf_t >= self.conf_threshold)
+                    & (num_low_conf_t < float(self.occluded_count))
+                )
+                # EMA candidate — 단 _ema_prev commit 은 finalize_async 에서만
+                # (invalid frame 이 state 오염시키지 않도록).
+                ema_kpts_3d = kpts_3d
+                if self._ema_prev is not None:
+                    ema_kpts_3d = (
+                        (1.0 - self.ema_alpha) * kpts_3d
+                        + self.ema_alpha * self._ema_prev
+                    )
+                return PoseResult(
+                    kpts_2d_px=xy_src,
+                    kpts_3d_m=ema_kpts_3d,
+                    kpt_conf=kp_conf,
+                    # legacy fields placeholder — finalize_async 에서 채움
+                    box_conf=0.0,
+                    valid=False,
+                    depth_invalid_ratio=0.0,
+                    box_conf_t=box_conf_t,
+                    valid_mask_t=valid_mask_t,
+                    depth_invalid_ratio_t=invalid_ratio_t,
+                    scalar_host=scalar_host,
+                    num_low_conf_t=num_low_conf_t,
+                    post_async_pending=True,
+                )
+
             # === Single D2H sync — combine 3 scalars into 1 transfer ===
             scalars = torch.stack([box_conf_t, num_low_conf_t, invalid_ratio_t]).cpu()
             box_conf, num_low_conf_f, invalid_ratio = scalars.tolist()
@@ -351,6 +412,54 @@ class GpuPostprocessor:
                 valid=True,
                 depth_invalid_ratio=invalid_ratio,
             )
+
+    # ------------------------------------------------------------------
+    # Phase 5 D1 (Codex R4) — finalize deferred async post (--post-async path)
+    # ------------------------------------------------------------------
+    def finalize_async(self, result: PoseResult, ts_s: float) -> PoseResult:
+        """Retire 시점에 호출. scalar_host (이미 D2H 끝) 에서 branch decision +
+        sticky/EMA state commit + final PoseResult build.
+
+        post_done.query()=True 이후 호출 보장. scalar_host.tolist() 만 허용
+        (CUDA tensor .cpu()/.item() 금지 — host sync 잔여 방지).
+
+        Codex R4 spec:
+          - lpost_ablation 우선 (둘 다 ON 시 finalize_async 호출 안 됨)
+          - constraints ON 시 .item() 잔여 (sweep 시 constraints OFF 권장)
+        """
+        if not result.post_async_pending or result.scalar_host is None:
+            return result
+
+        # scalar_host 는 pinned CPU tensor — D2H 이미 완료. tolist() 만.
+        box_conf, num_low_conf_f, invalid_ratio = result.scalar_host.tolist()
+        num_low_conf = int(num_low_conf_f)
+
+        # branch decision (current standard path 의 line 326-336 와 동일 로직)
+        if box_conf < self.conf_threshold or num_low_conf >= self.occluded_count:
+            return self._maybe_sticky(box_conf)
+
+        # OneEuro 영구 기각 — _filter 미사용. EMA 만.
+        kpts_3d = result.kpts_3d_m  # 이미 EMA candidate 적용됨 (post() 안)
+
+        # state commit (post() 의 sticky/EMA update 와 동일, 단 *retire 시점*)
+        self._ema_prev = kpts_3d.clone()
+        self._sticky_kpts_3d = kpts_3d.clone()
+        self._sticky_kpts_2d = result.kpts_2d_px.clone()
+        self._sticky_kpt_conf = result.kpt_conf.clone()
+        self._sticky_box_conf = box_conf
+        self._sticky_dir = invalid_ratio
+        self._sticky_age = 0
+
+        # final PoseResult — legacy fields 채움. *_t / scalar_host / pending 은
+        # async pending 흔적 — finalize 후 None / False 로 reset.
+        return PoseResult(
+            kpts_2d_px=result.kpts_2d_px,
+            kpts_3d_m=kpts_3d,
+            kpt_conf=result.kpt_conf,
+            box_conf=box_conf,
+            valid=True,
+            depth_invalid_ratio=invalid_ratio,
+        )
 
     # ------------------------------------------------------------------
     def _maybe_sticky(self, box_conf: float) -> PoseResult:
