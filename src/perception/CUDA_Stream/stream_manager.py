@@ -30,7 +30,20 @@ STAGE_NAMES = ("capture", "preproc", "infer", "post")
 
 @dataclass
 class StreamBundle:
-    """Holds a torch.cuda.Stream plus its record event."""
+    """Holds a torch.cuda.Stream plus its record event.
+
+    Two event APIs (Codex R2 #11):
+      Single-frame mode (current):
+        ``record_done()`` + ``wait_for(other)`` use ``self.done_event`` —
+        one event per bundle, re-recorded each frame.
+      Multi-inflight mode (Phase 4 frame overlap):
+        ``record_event(token.event)`` + ``wait_event(token.event)`` use
+        per-token events held by ``PipelineToken``. Required because the
+        single ``done_event`` is RACE-prone when two frames are in flight
+        on the same stream (the second record overwrites the first before
+        the first wait fires).
+    Both APIs may coexist; current code only uses the bundle one.
+    """
 
     name: str
     stream: "torch.cuda.Stream"
@@ -45,6 +58,38 @@ class StreamBundle:
     def wait_for(self, other: "StreamBundle") -> None:
         """Make this stream wait until ``other`` has recorded its event."""
         self.stream.wait_event(other.done_event)
+
+    # ------------------------------------------------------------------
+    # Per-token event API (Phase 4 frame overlap, Codex R2 #11).
+    # Currently UNUSED — added in Phase 1 Day 2 so Phase 4 can wire tokens
+    # without touching StreamBundle again.
+    # ------------------------------------------------------------------
+    def record_event(self, event: "torch.cuda.Event") -> None:
+        """Record an externally-owned event on this bundle's stream.
+
+        Caller (PipelineToken) owns the event lifecycle. This method is the
+        per-token analogue of ``record_done()``.
+        """
+        event.record(self.stream)
+
+    def wait_event(self, event: "torch.cuda.Event") -> None:
+        """Make this stream wait on an externally-owned event.
+
+        Per-token analogue of ``wait_for(other)`` but the event is supplied
+        directly instead of being read from another bundle's ``done_event``.
+        """
+        self.stream.wait_event(event)
+
+    @staticmethod
+    def make_event(enable_timing: bool = False) -> "torch.cuda.Event":
+        """Create a token-owned event.
+
+        ``enable_timing=False`` for stream dependencies (cheaper —
+        ``cudaEventDisableTiming`` flag). Tracer-owned events for stage
+        timing should set ``enable_timing=True`` separately.
+        ``blocking=False`` so ``query()`` is a non-blocking driver call.
+        """
+        return torch.cuda.Event(enable_timing=enable_timing, blocking=False)
 
 
 class StreamManager:
