@@ -142,9 +142,12 @@ class StreamedPosePipeline:
         self._input = input_name or runner.input_names[0]
         self._output = output_name or runner.output_names[0]
 
-        # in-flight bookkeeping for overlap (not true triple buffer — we
-        # keep 3 "tokens" representing capture/infer/post frames)
-        self._pending: Deque[dict] = deque(maxlen=3)
+        # In-flight bookkeeping for Phase 4 frame overlap (Codex R3).
+        # NOTE: ``maxlen`` 금지 — auto-drop 시 live PipelineToken (CUDA event +
+        # frame tensor strong ref) 가 silently freed. submit 시 수동으로
+        # ``len(_pending) >= self._output_ring_size`` check 로 backpressure.
+        # Phase 1 D1-D3 까지 미사용. flag --frame-overlap 활성 시 채움.
+        self._pending: Deque["PipelineToken"] = deque()
 
         # Prime every stream's done_event once so any consumer that calls
         # ``wait_for(X)`` on frame 0 has a defined event to wait on.
@@ -617,6 +620,263 @@ class StreamedPosePipeline:
             box_conf=result.box_conf,
             valid=True,
             depth_invalid_ratio=result.depth_invalid_ratio,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 4 D1 — frame overlap helpers (Codex R3, currently UNUSED)
+    # ------------------------------------------------------------------
+    # 호출 path: ``_run_with_overlap()`` (Step 2.C 에서 추가) — flag
+    # ``--frame-overlap`` ON 시. flag OFF 시 ``_run_sequential()`` (현재
+    # ``run_overlapped_step``) 가 그대로 호출. 따라서 helper 4개 단독은
+    # 영향 0 (호출자 없음).
+    #
+    # Cycle (Codex R3 Q7):
+    #   tick = self._retire_ready(block=False)
+    #   frame = self.bridge.latest(timeout=0.0 if tick else 0.5)
+    #   if frame and len(_pending) < ring_size: self._submit_token(frame)
+    #   return tick or self._retire_ready(block=False)
+    #
+    # 핵심 spec (Codex R3 정정):
+    #   - _pending 은 maxlen 없는 deque
+    #   - retire block path: token.post_done.synchronize() (host wait — NOT
+    #     torch.cuda.current_stream().wait_event())
+    #   - per-token Event: 매 frame 새로 생성 (재기록 없음, L2a 와 차이)
+    #   - last_inf_done guard: pre.wait_event(self._last_inf_done) 다음
+    #     pre 시작 전 — single self.pre.out 보호
+    # ------------------------------------------------------------------
+
+    def _make_token(
+        self, frame: ZEDFrame, ring_idx: int
+    ) -> "PipelineToken":
+        """Token-owned state for Phase 4 frame overlap (Codex R3).
+
+        Per-token Events 는 dependency only (enable_timing=False).
+        Tracer 는 별도 timing event pair 보유 (FrameTrace.events).
+        """
+        pickup_ns = time.time_ns()
+        self._frame_count += 1
+
+        meta = FrameMeta(
+            frame_id=frame.frame_id,
+            ts_ns=frame.ts_ns,
+            bridge_start_ns=frame.bridge_start_ns,
+            ready_ns=frame.ready_ns,
+            pickup_ns=pickup_ns,
+            capture_ms=dict(frame.capture_ms),
+        )
+        # P1D2 helper — token-owned event factory.
+        make_event = self.sm.bundle("preproc").make_event
+        return PipelineToken(
+            seq=self._frame_count,
+            frame=frame,
+            meta=meta,
+            lb_params=None,
+            output_snapshot_idx=ring_idx,
+            raw_snapshot=self._output_ring[ring_idx],
+            pre_done=make_event(),
+            inf_done=make_event(),
+            snapshot_done=make_event(),
+            post_done=make_event(),
+            trace=self.tracer.begin_token(
+                frame_id=frame.frame_id, ts_ns=frame.ts_ns
+            ),
+            submit_ns=pickup_ns,
+        )
+
+    def _submit_token(self, frame: ZEDFrame) -> None:
+        """Submit one frame: pre + inf + D2D snapshot + post (background).
+
+        Stream chain:
+          pre.stream:  wait(frame.ready_event) + wait(last_inf_done)
+                       → preproc → record(token.pre_done)
+          inf.stream:  wait(token.pre_done) → bind_input + graph.replay()
+                       → record(token.inf_done)
+                       → snapshot.copy_(raw_output) → record(token.snapshot_done)
+          post.stream: wait(token.snapshot_done) → post(snapshot)
+                       → record(token.post_done)
+
+        ``self._last_inf_done`` 갱신 — 다음 frame 의 pre 가 wait.
+        ``_pending.append(token)`` — retire 가 후속 처리.
+        """
+        cap = self.sm.bundle("capture")
+        pre = self.sm.bundle("preproc")
+        inf = self.sm.bundle("infer")
+        po = self.sm.bundle("post")
+
+        ring_idx = self._ring_idx
+        token = self._make_token(frame, ring_idx)
+        self._ring_idx = (self._ring_idx + 1) % self._output_ring_size
+
+        # pre stage: input ring 사용 안 함 (single self.pre.out + last_inf_done guard)
+        if frame.ready_event is not None:
+            pre.wait_event(frame.ready_event)
+        else:
+            pre.wait_for(cap)
+
+        if self._last_inf_done is not None:
+            pre.wait_event(self._last_inf_done)
+
+        self.tracer.mark_start_token(token.trace, "pre", pre.stream)
+        _, token.lb_params = self.pre(frame.rgb_gpu, stream=pre.stream)
+        self.tracer.mark_end_token(token.trace, "pre", pre.stream)
+        pre.record_event(token.pre_done)
+
+        # inf stage: graph replay → D2D snapshot copy → done
+        inf.wait_event(token.pre_done)
+        self.runner.bind_input_address(self._input, self.pre.out)
+
+        if (
+            self._frame_count == self._graph_warmup_frames
+            and self._inf_graph is None
+        ):
+            self._try_capture_inf_graph(inf)
+
+        self.tracer.mark_start_token(token.trace, "inf", inf.stream)
+        with torch.cuda.stream(inf.stream):
+            if self._inf_graph is not None and self._inf_graph.captured:
+                self._inf_graph.replay()
+            else:
+                self.runner.infer_async(self.sm.stream_ptr("infer"))
+        self.tracer.mark_end_token(token.trace, "inf", inf.stream)
+        inf.record_event(token.inf_done)
+        self._last_inf_done = token.inf_done
+
+        # D2D copy on inf.stream — chained after graph replay
+        with torch.cuda.stream(inf.stream):
+            token.raw_snapshot.copy_(
+                self.runner.get_output(self._output), non_blocking=True
+            )
+        inf.record_event(token.snapshot_done)
+
+        # post stage: snapshot read (raw_output 직접 사용 X)
+        po.wait_event(token.snapshot_done)
+        self.tracer.mark_start_token(token.trace, "post", po.stream)
+        token.result = self.post(
+            raw_output=token.raw_snapshot,
+            depth_hw=frame.depth_gpu,
+            lb_params=token.lb_params,
+            calibration=frame.calibration,
+            stream=po.stream,
+            ts_s=frame.ts_ns * 1e-9,
+        )
+        self.tracer.mark_end_token(token.trace, "post", po.stream)
+        po.record_event(token.post_done)
+
+        self._pending.append(token)
+
+    def _retire_ready(self, block: bool = False) -> Optional[PipelineTick]:
+        """If oldest pending token's post is ready, finalize + return tick.
+
+        block=False (default): non-blocking ``post_done.query()`` — None if
+        not ready. block=True: ``post_done.synchronize()`` (host wait —
+        NOT torch.cuda.current_stream().wait_event() per Codex R3 정정).
+        """
+        if not self._pending:
+            return None
+
+        token = self._pending[0]
+        if not token.post_done.query():
+            if not block:
+                return None
+            token.post_done.synchronize()
+
+        gpu_done_ns = time.time_ns()
+        self._pending.popleft()
+        return self._finalize_token(token, gpu_done_ns)
+
+    def _finalize_token(
+        self, token: "PipelineToken", gpu_done_ns: int
+    ) -> PipelineTick:
+        """Build PipelineTick from retired token.
+
+        Constraint apply, tracer end, latency_ms compute. ablation_active 시
+        constraint skip + tracer scalar marker -1 (P_post Phase 0 그대로).
+        """
+        if token.result is None:
+            raise RuntimeError("PipelineToken retired without result")
+
+        result = token.result
+        ablation_active = self.post.lpost_ablation
+
+        # ablation safety asserts (Codex R7 → R3 maintained)
+        if ablation_active and result.valid_mask_t is None:
+            raise RuntimeError(
+                "lpost_ablation=True but result.valid_mask_t is None"
+            )
+        if not ablation_active and result.valid_mask_t is not None:
+            raise RuntimeError(
+                "lpost_ablation=False but result has valid_mask_t"
+            )
+
+        world_frame_applied = "R_world_from_cam" in token.frame.calibration
+
+        if ablation_active:
+            final_result = result
+            constraint_ms = 0.0
+            self.tracer.set_result_meta_token(
+                token.trace,
+                valid=False,
+                occluded_count=-1,
+                depth_invalid_ratio=-1.0,
+                box_conf=-1.0,
+            )
+        else:
+            t_constraint = time.perf_counter()
+            final_result = self._apply_constraints_and_fallback(
+                result, ts_s=token.meta.ts_ns * 1e-9
+            )
+            constraint_ms = (time.perf_counter() - t_constraint) * 1e3
+            self.tracer.set_result_meta_token(
+                token.trace,
+                valid=final_result.valid,
+                occluded_count=int(
+                    (final_result.kpt_conf < self.post.kpt_conf_threshold).sum().item()
+                )
+                if final_result.valid
+                else 0,
+                depth_invalid_ratio=final_result.depth_invalid_ratio,
+                box_conf=final_result.box_conf,
+            )
+
+        trace = self.tracer.end_token(token.trace)
+
+        # decomposition (mock + run_overlapped_step 동일 anchor)
+        zed_lag_ms = (
+            (token.meta.bridge_start_ns - token.meta.ts_ns) / 1e6
+            if token.meta.bridge_start_ns
+            else 0.0
+        )
+        bridge_proc_ms = (
+            (token.meta.ready_ns - token.meta.bridge_start_ns) / 1e6
+            if token.meta.bridge_start_ns and token.meta.ready_ns
+            else 0.0
+        )
+        queue_wait_ms = (
+            (token.meta.pickup_ns - token.meta.ready_ns) / 1e6
+            if token.meta.ready_ns
+            else 0.0
+        )
+        pipeline_proc_ms = (gpu_done_ns - token.meta.pickup_ns) / 1e6
+
+        token.retire_ns = gpu_done_ns
+        return PipelineTick(
+            frame_id=token.meta.frame_id,
+            ts_ns=token.meta.ts_ns,
+            result=final_result,
+            world_frame_applied=world_frame_applied,
+            latency_ms={
+                "e2e": (gpu_done_ns - token.submit_ns) / 1e6,
+                "constraint_ms": constraint_ms,
+                "true_e2e_ms": (gpu_done_ns - token.meta.ts_ns) / 1e6,
+                "zed_lag_ms": zed_lag_ms,
+                "bridge_proc_ms": bridge_proc_ms,
+                "queue_wait_ms": queue_wait_ms,
+                "pipeline_proc_ms": pipeline_proc_ms,
+                **{f"{k}_ms": v for k, v in trace.stage_ms.items()},
+                **token.meta.capture_ms,
+            },
+            meta=token.meta,
+            trace=trace,
         )
 
     def shutdown(self) -> None:
