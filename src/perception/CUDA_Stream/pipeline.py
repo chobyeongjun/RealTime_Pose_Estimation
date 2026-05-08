@@ -84,6 +84,10 @@ class PipelineToken:
     result: Optional[PoseResult] = None
     submit_ns: int = 0
     retire_ns: int = 0
+    # Phase 5 D1 (Codex R4) — token-owned pinned (3,) buffer for --post-async.
+    # post() 가 D2H async copy target. retire 시점에 .tolist() 만 (host sync 없음).
+    # per-frame lifetime → ring reuse race 방지. flag --post-async OFF 시 미사용.
+    post_scalar_host: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -702,6 +706,15 @@ class StreamedPosePipeline:
         )
         # P1D2 helper — token-owned event factory.
         make_event = self.sm.bundle("preproc").make_event
+        # Phase 5 D1 (Codex R4) — pinned (3,) buffer for --post-async path.
+        # ``post_async`` OFF 시 사용 안 됨 (post() 가 None 받고 standard path).
+        # ``post_async`` ON 시 D2H async copy target. per-frame allocation —
+        # cost 무시 (~µs).
+        post_scalar_host = (
+            torch.empty((3,), dtype=torch.float32, pin_memory=True)
+            if self.post.post_async
+            else None
+        )
         return PipelineToken(
             seq=self._frame_count,
             frame=frame,
@@ -717,6 +730,7 @@ class StreamedPosePipeline:
                 frame_id=frame.frame_id, ts_ns=frame.ts_ns
             ),
             submit_ns=pickup_ns,
+            post_scalar_host=post_scalar_host,
         )
 
     def _submit_token(self, frame: ZEDFrame) -> None:
@@ -785,6 +799,8 @@ class StreamedPosePipeline:
         inf.record_event(token.snapshot_done)
 
         # post stage: snapshot read (raw_output 직접 사용 X)
+        # Phase 5 D1: scalar_host 전달 — flag OFF 시 None (post() 무시),
+        # flag ON 시 D2H async target.
         po.wait_event(token.snapshot_done)
         self.tracer.mark_start_token(token.trace, "post", po.stream)
         token.result = self.post(
@@ -794,6 +810,7 @@ class StreamedPosePipeline:
             calibration=frame.calibration,
             stream=po.stream,
             ts_s=frame.ts_ns * 1e-9,
+            scalar_host=token.post_scalar_host,
         )
         self.tracer.mark_end_token(token.trace, "post", po.stream)
         po.record_event(token.post_done)
@@ -832,6 +849,19 @@ class StreamedPosePipeline:
             raise RuntimeError("PipelineToken retired without result")
 
         result = token.result
+
+        # Phase 5 D1 (Codex R4) — `--post-async` path: post_done.query()=True
+        # 면 scalar_host D2H 도 끝. finalize_async() 가 .tolist() + branch +
+        # state commit. lpost_ablation 우선 (둘 다 ON 시 finalize_async skip).
+        if (
+            self.post.post_async
+            and not self.post.lpost_ablation
+            and result.post_async_pending
+        ):
+            result = self.post.finalize_async(
+                result, ts_s=token.meta.ts_ns * 1e-9
+            )
+
         ablation_active = self.post.lpost_ablation
 
         # ablation safety asserts (Codex R7 → R3 maintained)
