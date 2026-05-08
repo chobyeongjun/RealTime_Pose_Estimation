@@ -58,6 +58,12 @@ class FrameTrace:
     constraint_reason: str = ""
     box_conf: float = 0.0
 
+    # Phase 4 D1 / Codex R3 — per-token timing events for multi-inflight overlap.
+    # 기존 PipelineTracer._events 는 single bundle (race in overlap).
+    # token-aware path 는 각 token 의 FrameTrace 가 own (start, end) Event pair.
+    # repr=False: dataclass repr 출력 시 CUDA Event 객체 dump 방지.
+    events: Dict[str, tuple] = field(default_factory=dict, repr=False)
+
     @property
     def e2e_ms(self) -> float:
         return (self.t_host_end - self.t_host_start) * 1e3
@@ -164,6 +170,81 @@ class PipelineTracer:
             if len(self._rows) > self.ring_size and self.csv_path is None:
                 self._rows.pop(0)
         return self._current
+
+    # ------------------------------------------------------------------
+    # Token-aware API (Codex R3 — Phase 4 D1 prerequisite)
+    # ------------------------------------------------------------------
+    # Single-bundle ``self._events`` 가 multi-inflight 에서 *재기록 race* 발생.
+    # token-aware path 는 각 PipelineToken 의 FrameTrace.events 가 own pair.
+    # 기존 begin/mark_start/mark_end/end/set_result_meta 는 그대로 유지 →
+    # single-frame mode 호환. flag-based ablation (--frame-overlap) 시
+    # token-aware API 사용.
+    # ------------------------------------------------------------------
+    def begin_token(self, frame_id: int, ts_ns: int) -> FrameTrace:
+        """Token-owned FrameTrace 생성. submit_token() 안에서 호출."""
+        trace = FrameTrace(frame_id=frame_id, ts_ns=ts_ns)
+        trace.t_host_start = time.perf_counter()
+        if torch.cuda.is_available():
+            trace.events = {
+                s: (
+                    torch.cuda.Event(enable_timing=True),
+                    torch.cuda.Event(enable_timing=True),
+                )
+                for s in STAGE_NAMES
+            }
+        return trace
+
+    def mark_start_token(
+        self,
+        trace: FrameTrace,
+        stage: str,
+        stream: "torch.cuda.Stream",
+    ) -> None:
+        pair = trace.events.get(stage)
+        if pair is not None:
+            pair[0].record(stream)
+
+    def mark_end_token(
+        self,
+        trace: FrameTrace,
+        stage: str,
+        stream: "torch.cuda.Stream",
+    ) -> None:
+        pair = trace.events.get(stage)
+        if pair is not None:
+            pair[1].record(stream)
+
+    def set_result_meta_token(
+        self,
+        trace: FrameTrace,
+        valid: bool,
+        occluded_count: int = 0,
+        depth_invalid_ratio: float = 0.0,
+        constraint_reason: str = "",
+        box_conf: float = 0.0,
+    ) -> None:
+        trace.valid = valid
+        trace.occluded_count = occluded_count
+        trace.depth_invalid_ratio = depth_invalid_ratio
+        trace.constraint_reason = constraint_reason
+        trace.box_conf = box_conf
+
+    def end_token(self, trace: FrameTrace) -> FrameTrace:
+        """retire_ready() 의 finalize 시점에 호출. post_done.query()/synchronize()
+        후라 elapsed_time 안전."""
+        trace.t_host_end = time.perf_counter()
+        for stage, (a, b) in trace.events.items():
+            try:
+                trace.stage_ms[stage] = a.elapsed_time(b)
+            except Exception as err:  # pragma: no cover
+                LOGGER.debug("tracer end_token elapsed_time %s failed: %s", stage, err)
+                trace.stage_ms[stage] = 0.0
+        if self.enabled:
+            row = trace.to_row()
+            self._rows.append(row)
+            if len(self._rows) > self.ring_size and self.csv_path is None:
+                self._rows.pop(0)
+        return trace
 
     # ------------------------------------------------------------------
     # Post-run API
