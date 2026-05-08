@@ -63,13 +63,109 @@ de51d6e Revert P1D4 (D2D copy 단독 효과 0)
 ```bash
 # CuPy 설치 확인 (γ 의 --zed-cuda-interop 의존성)
 python3 -c "import cupy; print(f'CuPy: {cupy.__version__}')" 2>&1
-# 기대: CuPy: 12.x.x 또는 13.x.x
+# 기대: CuPy: 12.x.x (JetPack 6) 또는 11.x (JetPack 5) 또는 13.x (JetPack 7)
+```
 
-# 미설치 시 — γ case (08-11) skip 하거나 install:
-# pip3 install cupy-cuda12x   # Jetson L4T r36 (CUDA 12.2) 기준
+**JetPack / CUDA 버전 매칭** (Codex γ review R4):
+- JetPack 6.x (CUDA 12.x) → `pip3 install cupy-cuda12x`
+- JetPack 5.1.2 (CUDA 11.4) → `pip3 install cupy-cuda11x`
+- JetPack 7.x (CUDA 13.x) → `pip3 install cupy-cuda13x`
+
+JetPack 확인:
+```bash
+cat /etc/nv_tegra_release | head -1
+# 또는
+sudo apt show nvidia-jetpack | grep Version
 ```
 
 CuPy 없어도 baseline + α (case 00-07) 측정 가능. γ (case 08-11) 만 fail.
+
+### 0.4 γ Pre-flight probe (γ 측정 전 권장, Codex γ review verification)
+
+`--zed-cuda-interop` 가 *현재 ZED X Mini + SDK 5.2.1* 에서 작동하는지 *1 frame 으로 1초 검증*:
+
+```bash
+# Pre-flight: GPU retrieve + pixel parity (1 frame)
+PYTHONPATH=src python3 << 'PYEOF'
+import torch, pyzed.sl as sl
+import cupy
+from torch.utils.dlpack import from_dlpack
+
+zed = sl.Camera()
+init = sl.InitParameters()
+init.camera_resolution = sl.RESOLUTION.SVGA
+init.camera_fps = 120
+init.depth_mode = sl.DEPTH_MODE.PERFORMANCE
+status = zed.open(init)
+assert status == sl.ERROR_CODE.SUCCESS, f"open: {status}"
+
+# 1 frame grab
+rt = sl.RuntimeParameters()
+status = zed.grab(rt)
+assert status == sl.ERROR_CODE.SUCCESS, f"grab: {status}"
+
+# CPU retrieve (parity baseline)
+mat_cpu = sl.Mat()
+zed.retrieve_image(mat_cpu, sl.VIEW.LEFT)
+rgb_cpu = mat_cpu.get_data(deep_copy=True)
+print(f"CPU RGB: shape={rgb_cpu.shape} dtype={rgb_cpu.dtype}")
+
+# GPU retrieve (γ path)
+mat_gpu = sl.Mat()
+zed.retrieve_image(mat_gpu, sl.VIEW.LEFT, sl.MEM.GPU)
+rgb_cu = mat_gpu.get_data(sl.MEM.GPU, deep_copy=False)
+print(f"CuPy RGB: type={type(rgb_cu).__name__} shape={rgb_cu.shape} dtype={rgb_cu.dtype}")
+rgb_view = from_dlpack(rgb_cu)
+print(f"DLPack tensor: shape={tuple(rgb_view.shape)} dtype={rgb_view.dtype} device={rgb_view.device}")
+
+# D2D snapshot (γ path)
+rgb_gpu = torch.empty(tuple(rgb_view.shape), dtype=torch.uint8, device='cuda:0')
+rgb_gpu.copy_(rgb_view, non_blocking=True)
+torch.cuda.synchronize()
+
+# Pixel parity (sample center)
+import numpy as np
+h, w = rgb_cpu.shape[:2]
+cy, cx = h // 2, w // 2
+rgb_gpu_back = rgb_gpu.cpu().numpy()
+diff = np.abs(rgb_cpu[cy, cx].astype(int) - rgb_gpu_back[cy, cx].astype(int)).max()
+print(f"Center pixel diff (max): {diff} (expect 0 — bit-perfect)")
+assert diff == 0, "Pixel parity FAIL"
+
+# Depth GPU retrieve probe
+mat_d_gpu = sl.Mat()
+zed.retrieve_measure(mat_d_gpu, sl.MEASURE.DEPTH, sl.MEM.GPU)
+depth_cu = mat_d_gpu.get_data(sl.MEM.GPU, deep_copy=False)
+depth_view = from_dlpack(depth_cu)
+if depth_view.ndim == 3 and depth_view.shape[-1] == 1:
+    depth_view = depth_view[..., 0]
+print(f"Depth GPU: shape={tuple(depth_view.shape)} dtype={depth_view.dtype}")
+finite = torch.isfinite(depth_view).float().mean().item()
+print(f"Depth finite ratio: {finite:.3f} (expect > 0.5)")
+assert finite > 0.3, "Depth all NaN/Inf — GPU retrieve broken"
+
+zed.close()
+print()
+print("=== γ PRE-FLIGHT PASSED ===")
+print("    --zed-cuda-interop 안전 — combinations sweep 진행 가능")
+PYEOF
+```
+
+**기대 출력**:
+```
+CPU RGB: shape=(600, 960, 4) dtype=uint8
+CuPy RGB: type=ndarray shape=(600, 960, 4) dtype=uint8
+DLPack tensor: shape=(600, 960, 4) dtype=torch.uint8 device=cuda:0
+Center pixel diff (max): 0 (expect 0 — bit-perfect)
+Depth GPU: shape=(600, 960) dtype=torch.float32
+Depth finite ratio: 0.872 (expect > 0.5)
+=== γ PRE-FLIGHT PASSED ===
+```
+
+**Fail 시 분기**:
+- `pixel diff > 0` → ZED MEM.GPU 가 broken view 반환. γ case 08-11 skip, α case 00-07 만 측정.
+- `depth finite ratio < 0.3` → depth GPU retrieve broken. 동일 분기.
+- `import cupy` fail → CuPy install 후 재시도.
 
 ### 0.4 Import smoke test (1분)
 
@@ -112,7 +208,7 @@ sudo bash scripts/zedlag_sweep.sh combinations 2>&1 | tee /tmp/sweep_results.log
 자동 실행:
 - 12 case × 25s ≈ 5분
 - 각 case 별 launch_clean + log 저장
-- 마지막에 비교 표 자동 출력
+- 마지막에 비교 표 + ⚠️ FAILED CASES summary 자동 출력
 
 결과 위치:
 ```
@@ -122,6 +218,11 @@ sudo bash scripts/zedlag_sweep.sh combinations 2>&1 | tee /tmp/sweep_results.log
   ├── ...
   └── 11_all_lever_new.log
 ```
+
+**Codex γ review fix (002218a)**: 실패 case 가 *silent 통과 안 함*. 
+- 각 case 의 final metrics (`true_e2e`) 누락 시 FAILED_CASES 에 등록
+- summary 에 `⚠️ FAILED CASES (N)` 출력
+- case 별 isolation 유지 (다음 case 계속 진행)
 
 ---
 
