@@ -237,7 +237,12 @@ class GpuPostprocessor:
             conf = det[:, 4]
             # Use GPU argmax (no D2H here). gather best row directly.
             best = torch.argmax(conf)
-            box_conf_t = conf[best]
+            # Phase 1 Day 3 (Codex R2 #5) — clone() to detach from raw_output.
+            # Without this, box_conf_t / kp_conf are views into TRT output_0
+            # and get silently corrupted when a future inference overwrites
+            # the buffer (Phase 4 frame overlap). Clone is owned ⇒ safe even
+            # if raw_output is reused or freed before publish D2H completes.
+            box_conf_t = conf[best].clone()
 
             # Stage 1 — do ALL GPU work first, no .item()/.cpu() calls.
             # We collect every scalar we'll need into a single tensor and
@@ -248,7 +253,10 @@ class GpuPostprocessor:
             # Gather best row's keypoints (still on GPU)
             kpts = det[best, kpt_offset : kpt_offset + K * 3].view(K, 3)
             xy_letter = kpts[:, :2]
-            kp_conf = kpts[:, 2]
+            # Phase 1 Day 3 (Codex R2 #5) — clone() detaches kp_conf from
+            # raw_output view. xy_letter is followed by xy_src.clone() below
+            # (line ~254), so it's already safe; kp_conf was the leak.
+            kp_conf = kpts[:, 2].clone()
 
             # Un-letterbox
             xy_src = xy_letter.clone()

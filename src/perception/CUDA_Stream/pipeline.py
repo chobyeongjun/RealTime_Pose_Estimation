@@ -161,6 +161,28 @@ class StreamedPosePipeline:
         self._graph_warmup_frames = 30
         self._graph_attempted = False
 
+        # Phase 1 Day 3 (Codex R2 #4) — output snapshot ring (size 2).
+        # Race protection (Phase 4 prerequisite): inf 가 raw_output (single
+        # binding tensor) 에 write 한 직후 D2D copy 로 snapshot[i] 에 옮겨
+        # 놓고, post 가 snapshot 을 read. 다음 frame 의 inf 가 raw_output
+        # 덮어써도 post 의 read 는 안전.
+        # Ring size 2 = inf[N+1] || post[N] 가 다른 slot 사용 (alternate i, i+1).
+        # Phase 1 D3: 메모리만 할당 (D2D copy 는 P1D4 에서 추가, cycle 재구조는 P4D1).
+        # Phase 4: PipelineToken.output_snapshot_idx 가 token 별 slot 결정.
+        output_tensor = self.runner.get_output(self._output)
+        self._output_ring_size = 2
+        self._output_ring: list[torch.Tensor] = [
+            torch.empty_like(output_tensor) for _ in range(self._output_ring_size)
+        ]
+        self._ring_idx = 0
+
+        # Phase 1 Day 3 — last inf_done event 보관 (Phase 4 prerequisite).
+        # Phase 4 시 다음 frame 의 pre 가 ``pre.stream.wait_event(self._last_inf_done)``
+        # 으로 self.pre.out (single input buffer) 보호.
+        # Single-frame mode (현재) 에서는 미사용 — cycle 끝의 po.stream.synchronize()
+        # 가 자연 보호.
+        self._last_inf_done: Optional[torch.cuda.Event] = None
+
         # (Reserved for future fallback use — currently constraint rejects
         # emit zeros+valid=False instead of using stale data. Keeping this
         # as a field documented for future work; DO NOT read it elsewhere
