@@ -5,10 +5,11 @@
 # 결과 한 번에 비교. 각 case 마다 launch_clean.sh 20s.
 #
 # 사용법:
-#   sudo bash scripts/zedlag_sweep.sh fps        # Round 0 — 120/60/30 (★ ISP buffer 결정적 격리)
-#   sudo bash scripts/zedlag_sweep.sh exposure   # Round 1 — AUTO/5/8/12ms
-#   sudo bash scripts/zedlag_sweep.sh depth      # Round 2 — PERFORMANCE/QUALITY/ULTRA
-#   sudo bash scripts/zedlag_sweep.sh sensing    # Round 3 — STANDARD/FILL
+#   sudo bash scripts/zedlag_sweep.sh fps           # Round 0 — 120/60/30 (★ ISP buffer 결정적 격리)
+#   sudo bash scripts/zedlag_sweep.sh exposure      # Round 1 — AUTO/5/8/12ms
+#   sudo bash scripts/zedlag_sweep.sh depth         # Round 2 — PERFORMANCE/QUALITY/ULTRA
+#   sudo bash scripts/zedlag_sweep.sh sensing       # Round 3 — STANDARD/FILL
+#   sudo bash scripts/zedlag_sweep.sh combinations  # Phase 4+5 — 8 조합 ablation (★)
 #
 # 주의: TDD discipline 상 단계별 측정 후 결정이 정도. 본 sweep 은
 # *시간 절약* 용 — 각 round 의 4 case 를 손으로 안 돌리고 자동화.
@@ -69,8 +70,24 @@ case "$ROUND" in
         run_case "standard" --sensing-mode STANDARD
         run_case "fill"     --sensing-mode FILL
         ;;
+    combinations)
+        # Phase 4 D1 + Phase 5 D1 (Codex R3+R4) — 8 조합 ablation.
+        # 어느 flag 조합이 진짜 -ms 효과 있는지 결정적 격리.
+        # Expected (Codex R4):
+        #   baseline ~65 / overlap only ~65 / async only ~62 /
+        #   ★ overlap+async ~42-50 / lpost ~55 / 모두 ON ~42-50
+        # 측정 시간: 8 case × 25s ≈ 4분 (각 case duration 20s, 마진 5s)
+        run_case "00_baseline"               ""
+        run_case "01_overlap_only"           --frame-overlap
+        run_case "02_async_only"             --post-async
+        run_case "03_overlap_async"          --frame-overlap --post-async
+        run_case "04_lpost_only"             --lpost-ablation
+        run_case "05_overlap_lpost"          --frame-overlap --lpost-ablation
+        run_case "06_async_lpost"            --post-async --lpost-ablation
+        run_case "07_all_on"                 --frame-overlap --post-async --lpost-ablation
+        ;;
     *)
-        echo "ERROR: unknown round '${ROUND}'. Use {fps|exposure|depth|sensing}"
+        echo "ERROR: unknown round '${ROUND}'. Use {fps|exposure|depth|sensing|combinations}"
         exit 1
         ;;
 esac
