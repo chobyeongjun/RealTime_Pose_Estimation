@@ -342,17 +342,13 @@ class GpuPostprocessor:
                     (box_conf_t >= self.conf_threshold)
                     & (num_low_conf_t < float(self.occluded_count))
                 )
-                # EMA candidate — 단 _ema_prev commit 은 finalize_async 에서만
-                # (invalid frame 이 state 오염시키지 않도록).
-                ema_kpts_3d = kpts_3d
-                if self._ema_prev is not None:
-                    ema_kpts_3d = (
-                        (1.0 - self.ema_alpha) * kpts_3d
-                        + self.ema_alpha * self._ema_prev
-                    )
+                # Codex review fix (2026-05-08): EMA candidate 계산 *지연*.
+                # multi-inflight 시 token N+1 가 token N retire 전 같은 _ema_prev
+                # 읽으면 stale state. raw kpts_3d 만 저장, EMA 는 finalize_async()
+                # 에서 retire-order (sequential) 로 적용 → state 오염 방지.
                 return PoseResult(
                     kpts_2d_px=xy_src,
-                    kpts_3d_m=ema_kpts_3d,
+                    kpts_3d_m=kpts_3d,        # ★ raw — EMA in finalize_async
                     kpt_conf=kp_conf,
                     # legacy fields placeholder — finalize_async 에서 채움
                     box_conf=0.0,
@@ -438,23 +434,34 @@ class GpuPostprocessor:
         if box_conf < self.conf_threshold or num_low_conf >= self.occluded_count:
             return self._maybe_sticky(box_conf)
 
-        # OneEuro 영구 기각 — _filter 미사용. EMA 만.
-        kpts_3d = result.kpts_3d_m  # 이미 EMA candidate 적용됨 (post() 안)
+        # Codex review fix (2026-05-08): EMA 를 *retire-order 로* 적용.
+        # post() 안 candidate 계산 안 함 → result.kpts_3d_m 가 raw.
+        # finalize_async 가 retire-order 라 _ema_prev 가 *prev token 의 commit 후*
+        # 상태 → multi-inflight stale 제거.
+        kpts_3d = result.kpts_3d_m  # raw (post 에서 EMA 적용 안 함)
 
-        # state commit (post() 의 sticky/EMA update 와 동일, 단 *retire 시점*)
-        self._ema_prev = kpts_3d.clone()
-        self._sticky_kpts_3d = kpts_3d.clone()
+        # OneEuro 영구 기각 — _filter 사용 안 함. EMA 만.
+        if self._ema_prev is None:
+            ema_kpts_3d = kpts_3d
+        else:
+            ema_kpts_3d = (
+                (1.0 - self.ema_alpha) * kpts_3d
+                + self.ema_alpha * self._ema_prev
+            )
+
+        # state commit (retire-order 보장)
+        self._ema_prev = ema_kpts_3d.clone()
+        self._sticky_kpts_3d = ema_kpts_3d.clone()
         self._sticky_kpts_2d = result.kpts_2d_px.clone()
         self._sticky_kpt_conf = result.kpt_conf.clone()
         self._sticky_box_conf = box_conf
         self._sticky_dir = invalid_ratio
         self._sticky_age = 0
 
-        # final PoseResult — legacy fields 채움. *_t / scalar_host / pending 은
-        # async pending 흔적 — finalize 후 None / False 로 reset.
+        # final PoseResult — legacy fields 채움.
         return PoseResult(
             kpts_2d_px=result.kpts_2d_px,
-            kpts_3d_m=kpts_3d,
+            kpts_3d_m=ema_kpts_3d,
             kpt_conf=result.kpt_conf,
             box_conf=box_conf,
             valid=True,

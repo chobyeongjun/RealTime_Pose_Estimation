@@ -485,8 +485,17 @@ class StreamedPosePipeline:
         inf.record_done()
 
         # --- stage C: post (waits on infer)
+        # Codex review fix (2026-05-08): sequential path 도 --post-async 지원.
+        # post.post_async ON 시 local pinned scalar buffer 할당, post() 에 전달.
+        # 동일 stream synchronize 후 finalize_async() 가 sticky/EMA commit.
+        # 이게 없으면 sweep 의 02_async_only / 06_async_lpost case 가 raise.
         po.wait_for(inf)
         self.tracer.mark_start("post", po.stream)
+        seq_scalar_host = (
+            torch.empty((3,), dtype=torch.float32, pin_memory=True)
+            if (self.post.post_async and not self.post.lpost_ablation)
+            else None
+        )
         result = self.post(
             raw_output=self.runner.get_output(self._output),
             depth_hw=frame.depth_gpu,
@@ -494,10 +503,18 @@ class StreamedPosePipeline:
             calibration=frame.calibration,
             stream=po.stream,
             ts_s=frame.ts_ns * 1e-9,
+            scalar_host=seq_scalar_host,
         )
         self.tracer.mark_end("post", po.stream)
         po.record_done()
         po.stream.synchronize()  # only sync point in the hot path
+        # Sequential post_async: po.synchronize() 후 D2H 끝 → finalize_async OK.
+        if (
+            self.post.post_async
+            and not self.post.lpost_ablation
+            and result.post_async_pending
+        ):
+            result = self.post.finalize_async(result, ts_s=frame.ts_ns * 1e-9)
         t_end = time.perf_counter()        # GPU pipeline only (pre+inf+post)
         t_gpu_done_ns = time.time_ns()     # true_e2e anchor — before constraint CPU
 

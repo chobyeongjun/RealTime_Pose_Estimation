@@ -16,6 +16,10 @@
 # 단계별 가려면 launch_clean.sh 직접 호출.
 
 set -e
+# Codex review fix (2026-05-08): pipefail 활성 — `tee` 통과한 cmd 의 fail mask 방지.
+# 기존 `bash launch_clean.sh ... | tee ... || true` 가 *모든 fail* 을 silent 통과.
+# pipefail + run_case 안 의 `|| true` 는 *case 별 격리* 위해 유지.
+set -o pipefail
 
 ROUND="${1:-exposure}"
 TS="$(date +%Y%m%d_%H%M%S)"
