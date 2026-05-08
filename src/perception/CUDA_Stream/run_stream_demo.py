@@ -147,6 +147,22 @@ def parse_args() -> argparse.Namespace:
              "Codex Round 6 권장 spec. Codex H_post 가설 (post host block이 "
              "bridge에 영향) 양적 검증용. 측정 외 운영용 아님.",
     )
+    # Phase 4 D1 + Phase 5 D1 (Codex R3+R4) — flag-based ablation:
+    #   --frame-overlap : token-aware overlap cycle (submit/retire pattern)
+    #   --post-async    : D2H async + retire branch (host sync 제거)
+    # 8 조합 sweep 으로 어느 lever 진짜 효과 격리 (zedlag_sweep.sh combinations).
+    ap.add_argument(
+        "--frame-overlap", action="store_true",
+        help="Phase 4 D1 — token-aware frame overlap cycle. "
+             "submit/retire pattern + per-token Event + D2D snapshot ring. "
+             "표준 path 효과 0 (post host sync 잔여) — --post-async 와 함께 사용.",
+    )
+    ap.add_argument(
+        "--post-async", action="store_true",
+        help="Phase 5 D1 — async D2H + retire branch. "
+             "post() 의 .cpu() 제거, scalar D2H async + finalize_async() 가 retire "
+             "시점에 .tolist() + sticky/EMA commit. --lpost-ablation 우선.",
+    )
     return ap.parse_args()
 
 
@@ -269,11 +285,19 @@ def main() -> int:
     engine_in_dtype = runner.bindings[runner.input_names[0]].dtype
     LOGGER.info("engine input dtype = %s, matching preproc accordingly", engine_in_dtype)
     pre = GpuPreprocessor(imgsz=args.imgsz, device=device, dtype=engine_in_dtype)
+    # Phase 5 D1 — --post-async 와 --lpost-ablation 동시 사용 시 ablation 우선
+    # (Codex R4): --post-async 는 ignore. log 만 남김.
+    if args.lpost_ablation and args.post_async:
+        LOGGER.info(
+            "--post-async ignored: --lpost-ablation owns the post path "
+            "(둘 다 ON 시 ablation path 가 winner)"
+        )
     post = GpuPostprocessor(
         schema=schema,
         device=device,
         use_filter=args.use_filter,
         lpost_ablation=args.lpost_ablation,   # L_post Phase 0
+        post_async=args.post_async,           # Phase 5 D1 (Codex R4)
     )
     stack = ConstraintStack()
     # L_post Phase 0: constraints OFF (Codex Round 6 권장). They call .item()
@@ -401,9 +425,11 @@ def main() -> int:
     # Pipeline AFTER watchdog so we can pass the watchdog ref. Pipeline
     # needs to pause()/resume() the watchdog around CUDA graph capture
     # (otherwise watchdog.tick → stream.query() → invalidates capture).
+    # Phase 4 D1 — --frame-overlap flag (Codex R3) 전달.
     pipeline = StreamedPosePipeline(
         bridge, runner, pre, post, sm,
         constraints=stack, tracer=tracer, watchdog=watchdog,
+        frame_overlap=args.frame_overlap,
     )
 
     stop_flag = {"stop": False}
