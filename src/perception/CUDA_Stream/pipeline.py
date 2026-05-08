@@ -222,11 +222,22 @@ class StreamedPosePipeline:
         inf.wait_for(pre)
         with torch.cuda.stream(inf.stream):
             self.runner.infer_async(self.sm.stream_ptr("infer"))
+
+        # Phase 1 Day 4 (Codex R2 #4) — D2D copy on infer stream.
+        # Same code path as run_overlapped_step so test (run_once) and
+        # production (run_overlapped_step) exercise identical race-protection.
+        current_idx = self._ring_idx
+        snapshot = self._output_ring[current_idx]
+        with torch.cuda.stream(inf.stream):
+            snapshot.copy_(self.runner.get_output(self._output), non_blocking=True)
+        self._ring_idx = (self._ring_idx + 1) % self._output_ring_size
+
         inf.record_done()
+        self._last_inf_done = inf.done_event
 
         po.wait_for(inf)
         result = self.post(
-            raw_output=self.runner.get_output(self._output),
+            raw_output=snapshot,
             depth_hw=frame.depth_gpu,
             lb_params=lb,
             calibration=frame.calibration,
@@ -459,14 +470,32 @@ class StreamedPosePipeline:
         else:
             with torch.cuda.stream(inf.stream):
                 self.runner.infer_async(self.sm.stream_ptr("infer"))
-        self.tracer.mark_end("inf", inf.stream)
-        inf.record_done()
 
-        # --- stage C: post (waits on infer)
-        po.wait_for(inf)
+        # Phase 1 Day 4 (Codex R2 #4) — D2D copy raw_output → snapshot[idx].
+        # Same stream (infer) so ordering is implicit: graph replay → copy
+        # → done event. Cost: ~0.15 ms for FP16 ~770 KB on Orin NX.
+        # Phase 1: single-frame mode 라 효과는 없음 — Phase 4 cycle 재구조의
+        # prerequisite 로 *지금* 도입해 회귀 위험 분리 검증.
+        current_idx = self._ring_idx
+        snapshot = self._output_ring[current_idx]
+        with torch.cuda.stream(inf.stream):
+            snapshot.copy_(self.runner.get_output(self._output), non_blocking=True)
+        self._ring_idx = (self._ring_idx + 1) % self._output_ring_size
+
+        self.tracer.mark_end("inf", inf.stream)
+        inf.record_done()  # = "inf execute + D2D copy 끝" event
+
+        # Phase 1 Day 4 — Phase 4 prerequisite: 다음 frame 의 pre 가
+        # ``pre.stream.wait_event(self._last_inf_done)`` 으로 self.pre.out
+        # (single input buffer) 보호. Single-frame mode 에서는 미사용.
+        self._last_inf_done = inf.done_event
+
+        # --- stage C: post — snapshot 사용 (raw_output 직접 읽기 X).
+        # 다음 frame 의 inf 가 raw_output 덮어써도 snapshot 은 owned 이라 안전.
+        po.wait_for(inf)  # = wait until inf execute + D2D copy 끝
         self.tracer.mark_start("post", po.stream)
         result = self.post(
-            raw_output=self.runner.get_output(self._output),
+            raw_output=snapshot,
             depth_hw=frame.depth_gpu,
             lb_params=lb,
             calibration=frame.calibration,
