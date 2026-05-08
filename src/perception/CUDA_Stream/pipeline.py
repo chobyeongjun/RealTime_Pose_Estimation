@@ -26,22 +26,83 @@ from .cuda_graph import GraphedStep
 from .gpu_postprocess import GpuPostprocessor, PoseResult
 from .gpu_preprocess import GpuPreprocessor, LetterboxParams
 from .stream_manager import StreamManager
-from .tracer import PipelineTracer
+from .tracer import FrameTrace, PipelineTracer
 from .trt_runner import TRTRunner
 from .zed_gpu_bridge import ZEDFrame, ZEDGpuBridge
 
 LOGGER = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class FrameMeta:
+    """Read-only frame metadata. Immutable across pipeline stages.
+
+    All ts_ns fields share the epoch-ns clock domain (``time.time_ns()``):
+      ts_ns           — sensor exposure time (ZED hardware capture)
+      bridge_start_ns — bridge thread began processing (just after grab returns)
+      ready_ns        — bridge finished H2D launch + put frame in queue
+      pickup_ns       — pipeline received frame from bridge (just before pre)
+
+    Phase 1 contract (Codex R2): metadata MUST live on the FrameMeta token,
+    not interleaved with latency_ms dict — so that frame-token lifetime is
+    the single source of truth across submit → retire boundaries.
+    """
+
+    frame_id: int
+    ts_ns: int
+    bridge_start_ns: int
+    ready_ns: int
+    pickup_ns: int
+    capture_ms: dict
+
+
+@dataclass
+class PipelineToken:
+    """In-flight frame state for Phase 4 frame overlap (currently UNUSED).
+
+    Each token represents one frame's lifecycle from submit (pickup) to
+    retire (publish-ready). Phase 1 Day 1 declares the type; Phase 4
+    (frame overlap) populates ``self._pending: Deque[PipelineToken]``.
+
+    Per-token Events (Codex R2 #11): each frame gets its own pre/inf/
+    snapshot/post events — eliminates the bundle.done_event re-record race
+    in multi-inflight mode. Non-timing events (``enable_timing=False``)
+    for stream dependencies; tracer keeps timing events separately.
+    """
+
+    seq: int                              # monotonic submit counter
+    frame: ZEDFrame                       # strong ref → keeps depth_gpu/calibration alive
+    meta: FrameMeta
+    lb_params: Optional[LetterboxParams]
+    output_snapshot_idx: int              # index into output snapshot ring
+    raw_snapshot: torch.Tensor            # owned snapshot of TRT output (D2D copied)
+    pre_done: torch.cuda.Event
+    inf_done: torch.cuda.Event
+    snapshot_done: torch.cuda.Event
+    post_done: torch.cuda.Event
+    trace: FrameTrace
+    result: Optional[PoseResult] = None
+    submit_ns: int = 0
+    retire_ns: int = 0
+
+
 @dataclass
 class PipelineTick:
-    """Output of one pipeline step — what the host consumer receives."""
+    """Output of one pipeline step — what the host consumer receives.
+
+    Phase 1 (Codex R2 #10): ``meta`` and ``trace`` fields ADDED with
+    ``Optional[...] = None`` defaults so existing callers continue to work
+    unchanged. Phase 1 Steps 2-4 will populate ``meta``; Phase 4 will use
+    ``trace`` per-token. Until then both may be ``None``.
+    """
 
     frame_id: int
     ts_ns: int
     result: PoseResult
     latency_ms: dict  # {"e2e", "true_e2e_ms", pre/inf/post stage_ms, ...}
-    world_frame_applied: bool = False  # True when IMU R was applied to kpts_3d_m
+    meta: Optional[FrameMeta] = None
+    world_frame_applied: bool = False
+    trace: Optional[FrameTrace] = None
 
 
 class StreamedPosePipeline:
@@ -115,6 +176,11 @@ class StreamedPosePipeline:
         This serializes stages but still uses explicit streams / events.
         Used by tests and the `--no-overlap` flag in the benchmark.
         """
+        # Phase 1 Day 1 (Codex R2): capture pickup_ns at function entry —
+        # epoch-ns counterpart of t_start (perf_counter). FrameMeta below
+        # consumes pickup_ns so true_e2e/queue_wait math stays consistent
+        # with run_overlapped_step.
+        pickup_ns = time.time_ns()
         t_start = time.perf_counter()
         cap = self.sm.bundle("capture")
         pre = self.sm.bundle("preproc")
@@ -150,6 +216,17 @@ class StreamedPosePipeline:
 
         t_end = time.perf_counter()
         world_frame_applied = "R_world_from_cam" in frame.calibration
+        # Phase 1 Day 1 (Codex R2 #10): emit FrameMeta token alongside latency_ms.
+        # Same data, two views: latency_ms keeps the consumer-friendly ms scalars,
+        # FrameMeta keeps the raw epoch-ns clock for cross-stage correlation.
+        meta = FrameMeta(
+            frame_id=frame.frame_id,
+            ts_ns=frame.ts_ns,
+            bridge_start_ns=frame.bridge_start_ns,
+            ready_ns=frame.ready_ns,
+            pickup_ns=pickup_ns,
+            capture_ms=dict(frame.capture_ms),
+        )
         return PipelineTick(
             frame_id=frame.frame_id,
             ts_ns=frame.ts_ns,
@@ -159,6 +236,7 @@ class StreamedPosePipeline:
                 "e2e": (t_end - t_start) * 1e3,
                 "true_e2e_ms": (time.time_ns() - frame.ts_ns) / 1e6,
             },
+            meta=meta,
         )
 
     # ------------------------------------------------------------------
@@ -272,6 +350,16 @@ class StreamedPosePipeline:
         queue_wait_ms = (pickup_ns - frame.ready_ns) / 1e6 if frame.ready_ns else 0.0
         pipeline_proc_ms = (t_gpu_done_ns - pickup_ns) / 1e6
 
+        # Phase 1 Day 1 (Codex R2 #10): emit FrameMeta in mock too —
+        # decomp diagnostic 동일 anchor 유지 + token-style metadata 일관성.
+        meta = FrameMeta(
+            frame_id=frame.frame_id,
+            ts_ns=frame.ts_ns,
+            bridge_start_ns=frame.bridge_start_ns,
+            ready_ns=frame.ready_ns,
+            pickup_ns=pickup_ns,
+            capture_ms=dict(frame.capture_ms),
+        )
         return PipelineTick(
             frame_id=frame.frame_id,
             ts_ns=frame.ts_ns,
@@ -287,6 +375,7 @@ class StreamedPosePipeline:
                 "pipeline_proc_ms": pipeline_proc_ms,
                 **frame.capture_ms,
             },
+            meta=meta,
         )
 
     def run_overlapped_step(self) -> Optional[PipelineTick]:
@@ -432,6 +521,18 @@ class StreamedPosePipeline:
         queue_wait_ms = (pickup_ns - frame.ready_ns) / 1e6 if frame.ready_ns else 0.0
         pipeline_proc_ms = (t_gpu_done_ns - pickup_ns) / 1e6
 
+        # Phase 1 Day 1 (Codex R2 #10): emit FrameMeta token alongside latency_ms.
+        # FrameMeta is the *single source of truth* for frame metadata across
+        # submit → retire boundaries (Phase 4). latency_ms keeps consumer-friendly
+        # ms scalars; FrameMeta keeps the raw epoch-ns clock for correlation.
+        meta = FrameMeta(
+            frame_id=frame.frame_id,
+            ts_ns=frame.ts_ns,
+            bridge_start_ns=frame.bridge_start_ns,
+            ready_ns=frame.ready_ns,
+            pickup_ns=pickup_ns,
+            capture_ms=dict(frame.capture_ms),
+        )
         tick = PipelineTick(
             frame_id=frame.frame_id,
             ts_ns=frame.ts_ns,
@@ -449,6 +550,7 @@ class StreamedPosePipeline:
                 **{f"{k}_ms": v for k, v in trace.stage_ms.items()},
                 **frame.capture_ms,  # grab_ms, retrieve_rgb_ms, getdata_rgb_ms, etc.
             },
+            meta=meta,
         )
         return tick
 
