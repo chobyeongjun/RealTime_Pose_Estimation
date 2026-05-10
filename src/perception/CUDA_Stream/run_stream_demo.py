@@ -153,9 +153,10 @@ def parse_args() -> argparse.Namespace:
     # 8 조합 sweep 으로 어느 lever 진짜 효과 격리 (zedlag_sweep.sh combinations).
     ap.add_argument(
         "--frame-overlap", action="store_true",
-        help="Phase 4 D1 — token-aware frame overlap cycle. "
-             "submit/retire pattern + per-token Event + D2D snapshot ring. "
-             "표준 path 효과 0 (post host sync 잔여) — --post-async 와 함께 사용.",
+        help="[DEPRECATED 2026-05-10] token-aware frame overlap cycle. "
+             "12 case ablation sweep 측정 결과: 효과 0 + p99 +10-15ms 회귀 "
+             "(packed D2H multi-inflight 충돌). PRODUCTION 사용 금지. "
+             "측정 비교용으로만 유지.",
     )
     ap.add_argument(
         "--post-async", action="store_true",
@@ -450,7 +451,15 @@ def main() -> int:
     # Pipeline AFTER watchdog so we can pass the watchdog ref. Pipeline
     # needs to pause()/resume() the watchdog around CUDA graph capture
     # (otherwise watchdog.tick → stream.query() → invalidates capture).
-    # Phase 4 D1 — --frame-overlap flag (Codex R3) 전달.
+    # [DEPRECATED] --frame-overlap: 12 case ablation 측정 결과 효과 0 + p99
+    # +10-15ms 회귀. PRODUCTION 사용 금지. 측정 비교용으로만 유지.
+    if args.frame_overlap:
+        LOGGER.warning(
+            "[DEPRECATED] --frame-overlap: 12 case ablation 측정 결과 effect 0 + "
+            "p99 +10-15ms 회귀 (packed D2H multi-inflight 충돌). "
+            "PRODUCTION 사용 금지. 측정 비교용으로만 유지. "
+            "권장 path: --zed-cuda-interop --post-async (case 10, true_e2e p99 ~62ms)"
+        )
     pipeline = StreamedPosePipeline(
         bridge, runner, pre, post, sm,
         constraints=stack, tracer=tracer, watchdog=watchdog,
