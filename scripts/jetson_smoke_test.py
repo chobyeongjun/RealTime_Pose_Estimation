@@ -70,8 +70,22 @@ def main() -> int:
     bridge_sig = inspect.signature(ZEDGpuBridge.__init__)
     assert "zed_cuda_interop" in bridge_sig.parameters
 
+    # A.3 contract (2026-05-10) — --gpu-stream-priority + StreamManager None/[] 매핑
+    src_demo = open("src/perception/CUDA_Stream/run_stream_demo.py").read()
+    assert "--gpu-stream-priority" in src_demo
+    assert '"off"' in src_demo and '"infer-only"' in src_demo and '"all-high"' in src_demo
+    # A.2/A.4 fail-fast contract
+    assert "--post-fusion" in src_demo
+    assert "--graph-extended" in src_demo
+    assert "A.2 Triton kernel 미구현" in src_demo
+    # P2 fix — log "ALL"/[] trap
+    assert "_stages_repr = \"NONE\"" in src_demo
+
+    src_sm = open("src/perception/CUDA_Stream/stream_manager.py").read()
+    assert "high_priority_stages is None" in src_sm
+
     print("=== ALL CHECKS PASSED ===")
-    print("    Phase 1+4+5+gamma + critical fixes 모두 완료. Jetson 측정 가능.")
+    print("    Phase 1+4+5+gamma + A.3 flag + A.2/A.4 fail-fast contract 모두 완료.")
     return 0
 
 

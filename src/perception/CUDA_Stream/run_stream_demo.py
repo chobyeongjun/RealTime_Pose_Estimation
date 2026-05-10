@@ -346,9 +346,16 @@ def main() -> int:
         _high_stages = None
     else:
         _high_stages = ["infer"]
+    # Codex review P2 — log "ALL" trap: [] 도 falsy → 잘못된 "ALL". 명시적 매핑.
+    if _high_stages is None:
+        _stages_repr = "ALL"
+    elif not _high_stages:
+        _stages_repr = "NONE"
+    else:
+        _stages_repr = ",".join(_high_stages)
     LOGGER.info(
         "StreamManager priority — %s (high_stages=%s)",
-        args.gpu_stream_priority, _high_stages if _high_stages else "ALL",
+        args.gpu_stream_priority, _stages_repr,
     )
     sm = StreamManager(device=device, high_priority_stages=_high_stages)
     runner = TRTRunner(args.engine, device=device)

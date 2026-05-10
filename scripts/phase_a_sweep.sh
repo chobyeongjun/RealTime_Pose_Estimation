@@ -41,6 +41,18 @@ echo "  output dir : ${OUTDIR}"
 echo "  bridge env : BRIDGE_CORES=${BRIDGE_CORES:-unset}, BRIDGE_RT_PRIO=${BRIDGE_RT_PRIO:-unset}"
 echo ""
 
+# Codex review P1 — A.2/A.4 dependency check. case 3-8 require --post-fusion /
+# --graph-extended which fail-fast in current commit. 명시적 경고 (silent fail 회피).
+if grep -q "A.2 Triton kernel 미구현" "$ROOT/src/perception/CUDA_Stream/run_stream_demo.py" 2>/dev/null; then
+    echo "⚠️ ============================================================"
+    echo "⚠️ NOTICE: --post-fusion / --graph-extended currently FAIL-FAST."
+    echo "⚠️ Cases 3-8 will exit non-zero until A.2 (Triton kernel) is implemented."
+    echo "⚠️ Only cases 1, 2 will produce metrics in this run."
+    echo "⚠️ Continuing — case 3-8 logs will record FAILED in summary."
+    echo "⚠️ ============================================================"
+    echo ""
+fi
+
 FAILED_CASES=()
 
 run_case() {

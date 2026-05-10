@@ -57,12 +57,14 @@ def main() -> int:
         "output=%s count=%d every=%d imgsz=%d",
         args.output, args.count, args.every, args.imgsz,
     )
-    LOGGER.warning(
-        "현재는 Phase A 인프라 prep — A 측정 부족 시 B 진입할 때 wire-up. "
-        "Jetson 에서 ZEDGpuBridge + GpuPostprocessor 직접 호출하는 minimal loop "
-        "구현 후 동일 RGB/depth 의 (.npz) 덤프 시작. NEXT PR 에서 채움."
+    # Codex review P2 — automation 이 skeleton 의 exit 0 를 success 로 오해 회피.
+    # Phase B 진입 시 wire-up 후 saved > 0 면 0 return.
+    LOGGER.error(
+        "NOT IMPLEMENTED — Phase B 진입 시 wire-up 필요 (next PR). "
+        "Jetson 에서 ZEDGpuBridge + GpuPostprocessor minimal loop 구현 후 "
+        ".npz 덤프 시작. exit 1 으로 fail-fast (자동화 오해 회피)."
     )
-    return 0
+    return 1
 
 
 if __name__ == "__main__":
