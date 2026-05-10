@@ -62,8 +62,12 @@ def run(n_frames: int = 150) -> bool:
             time.sleep(0.005)
             continue
 
-        # P1: ShmReader returns 12-tuple; this verifier only uses the original 9.
-        frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d, box_conf, valid, depth_inv, world_flag = data[:9]
+        # SHM v2 (Codex review b1ky3965z P1-2 fix, 2026-05-11): 17-tuple.
+        (frame_id, rgb_ts_ns, _depth_ts, _depth_age,
+         kpts_3d, kpt_conf, kpts_2d, _kp_sigma, _pose_cov,
+         box_conf, valid, depth_inv, world_flag,
+         _pub_done, _v_reason, _ts_dom, _v_mask) = data
+        ts_ns = rgb_ts_ns   # legacy field name 유지
         read_count += 1
 
         if not valid:

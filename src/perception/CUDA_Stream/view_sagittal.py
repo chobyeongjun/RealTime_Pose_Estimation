@@ -374,8 +374,16 @@ def main() -> int:
             cur_valid = False
             cur_frame_id = -1
             if data is not None:
-                # P1: ShmReader returns 12-tuple; viewer only uses the original 9.
-                cur_frame_id, _ts, kpts_3d, kpt_conf, _kpts_2d, box_conf, valid, dir_, world_frame_applied = data[:9]
+                # SHM v2 (Codex review b1ky3965z P1-2 fix, 2026-05-11):
+                # ShmReader returns 17-tuple. order:
+                #   (frame_id, rgb_ts, depth_ts, depth_age_us,
+                #    kpts_3d, kp_conf, kpts_2d, kp_sigma, pose_cov,
+                #    box_conf, valid, depth_inv, world_frame,
+                #    publish_done, valid_reason, ts_domain, valid_mask_bits)
+                (cur_frame_id, _rgb_ts, _depth_ts, _depth_age,
+                 kpts_3d, kpt_conf, _kpts_2d, _kp_sigma, _pose_cov,
+                 box_conf, valid, dir_, world_frame_applied,
+                 _pub_done, _v_reason, _ts_dom, _v_mask) = data
                 # Geometric sanity gate — catches YOLO failure modes (self-occlusion,
                 # L/R swap, treadmill-belt confusion) that produce impossible poses
                 # while still reporting valid=True. Gate is read-only; rejected

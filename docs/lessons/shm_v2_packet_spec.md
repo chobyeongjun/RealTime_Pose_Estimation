@@ -36,17 +36,15 @@ Plan D EKF 가 vision-only constraint 에서 정직 작동 위해 *부족*.
 
 [ 16:  24]  uint64   rgb_ts_ns                ★ ZED IMAGE timestamp (T_N, RGB capture)
 [ 24:  32]  uint64   depth_ts_ns              ★ Depth retrieve 시각 (T_{N-1} if 1-frame-late)
-[ 32:  36]  uint32   depth_age_us             ★ (rgb_ts - depth_ts) 의 microseconds
-
-[ 36:  44]  uint64   publish_done_mono_ns     CLOCK_MONOTONIC, seqlock close 직전
-[ 44:  45]  uint8    ts_domain                0=CLOCK_REALTIME (epoch_ns)
+[ 32:  36]  uint32   depth_age_us            ★ (rgb_ts - depth_ts) 의 microseconds
+[ 36:  40]  float32  box_conf
+[ 40:  44]  float32  depth_invalid_ratio
+[ 44:  45]  uint8    valid_flag               (derived from valid_mask_bits)
 [ 45:  46]  uint8    world_frame              0=camera, 1=world (IMU/pitch rotated)
 [ 46:  47]  uint8    valid_reason             enum VALID_REASON_* (publish 단위)
-[ 47:  48]  uint8    flags                    bits: 0=depth_async, 1=v4l2_path, ...
-
-[ 48:  56]  uint8[8] valid_mask_bits          ★ per-kp validity (K up to 64)
-[ 56:  60]  float32  box_conf
-[ 60:  64]  float32  depth_invalid_ratio
+[ 47:  48]  uint8    ts_domain                0=CLOCK_REALTIME (epoch_ns)
+[ 48:  56]  uint64   publish_done_mono_ns     CLOCK_MONOTONIC, seqlock close 직전
+[ 56:  64]  uint64   valid_mask_bits          ★ per-kp validity (K up to 64)
 
 [ 64:  64+K*12]      float32[K][3]  kpts_3d_m
 [ ... ]              float32[K][2]  kpts_2d_px       (offset = 64 + K*12)

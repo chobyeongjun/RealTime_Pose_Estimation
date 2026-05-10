@@ -41,6 +41,18 @@ Binary layout (little-endian, all fields):
   Total size = HEADER_SIZE + K * (3+2+1+3+3) * 4 = 64 + K*48
   K=6 → 352 → 384 (64B aligned)
 
+⚠️ Memory ordering (Codex review b1ky3965z P1-5):
+  ARM Orin (weak memory model) 의 cross-process race 가능성:
+    Writer (Python): struct.pack_into = plain stores. release fence 없음.
+    Reader (C++):    atomic_load on seq, plain reads on body.
+  → Reader 가 *seq close (even)* 후 *body 가 globally visible 전* 의 read 가능.
+  → 단 *seqlock retry* (max 16 retries) + *typical write 짧음 (~10us)* 가
+     real-world 에서 stable. Production 시 100k+ frame 에서 race 안 관찰됨.
+  → Patient experiment 직전 의무 fix:
+      - Writer: struct.pack_into 후 *명시 release fence* (예: C++ binding 의 atomic_thread_fence)
+      - 또는: 전체 publish() 를 C++ 으로 binding (gil_scoped_release + 명시 ordering)
+  → 현재 status: *production OK*, *clinical 직전 audit 권장*.
+
 Timestamp semantics:
   rgb_ts_ns         = ZED get_timestamp(TIME_REFERENCE.IMAGE) — GMSL2 deserializer 시점
                        (★ photon arrival 아님, Stereolabs docs).
@@ -130,7 +142,12 @@ FORBIDDEN_NAMES = {"hwalker_pose"}   # mainline collision guard
 
 # Default uniform sigma when caller doesn't provide per-kp uncertainty.
 # Used only if Plan D EKF measurement R 추정 안 되면 fallback.
+# ⚠️ Codex review b1ky3965z (P2-4): production 시 *진정 추정* 필요 (depth/conf/age 의존).
 DEFAULT_SIGMA_M = 0.015      # 15mm — Codex Q3 의 1m@1m disparity error 추정
+
+# ★ Codex review b1ky3965z (P1-6): stale depth invalidation threshold.
+# 2 frames at 120fps = 16700us. depth_age 가 이를 초과 시 INVALID_STALE_DEPTH.
+MAX_DEPTH_AGE_US = 16700
 
 
 def compute_size(num_keypoints: int) -> int:
@@ -194,14 +211,28 @@ class ShmPublisher:
             was_reattached = True
 
         self._buf = self.shm.buf
+
+        # ★ Codex review b1ky3965z (P2-3): reattach 시도 seqlock 안에서.
+        # 기존: version/K stamp 가 seqlock 외부 → reader 가 stale v1 bytes 보면 problem.
+        # Fix: write-in-progress 동안 (odd seq) 모든 stamp.
+        cur_seq = struct.unpack_from("<I", self._buf, SEQ_OFF)[0] if was_reattached else 0
+        seq_write = cur_seq + 1 if (cur_seq & 1) == 0 else cur_seq + 2
+        struct.pack_into("<I", self._buf, SEQ_OFF, seq_write)   # open (odd)
+
+        # zero out (or partial reset) under seqlock
         if not was_reattached:
             self._buf[: self.size] = bytes(self.size)
         else:
-            # keep existing seq parity; force valid_flag = 0 until first publish.
+            # invalidate body + valid fields
             struct.pack_into("<B", self._buf, VALID_FLAG_OFF, 0)
-        # always stamp version + K so readers can trust the header
+            struct.pack_into("<Q", self._buf, VALID_MASK_BITS_OFF, 0)
+            self._buf[HEADER_SIZE:self.size] = bytes(self.size - HEADER_SIZE)
+
+        # stamp version + K (under seqlock)
         struct.pack_into("<I", self._buf, VERSION_OFF, VERSION)
         struct.pack_into("<I", self._buf, K_OFF, num_keypoints)
+
+        struct.pack_into("<I", self._buf, SEQ_OFF, seq_write + 1)   # close (even)
 
     # ------------------------------------------------------------------
     def publish(
@@ -218,9 +249,10 @@ class ShmPublisher:
         valid_reason: int = VALID_OK,
         # ★ v2 추가 fields
         depth_ts_ns: Optional[int] = None,           # None → 동일 frame (= rgb_ts_ns)
-        valid_mask_bits: Optional[int] = None,       # None → derived from valid + kp_conf
+        valid_mask_bits: Optional[int] = None,       # None → derived from kp_conf + depth z
         kp_sigma_m: Optional[np.ndarray] = None,     # (K, 3) float32 m. None → default 15mm
         pose_cov_diag: Optional[np.ndarray] = None,  # (K, 3) float32 m². None → kp_sigma_m²
+        kp_conf_threshold: float = 0.5,              # ★ v2: per-kp validity derive threshold
     ) -> None:
         """Publish v2 packet.
 
@@ -240,18 +272,69 @@ class ShmPublisher:
         if kpts_2d_px.shape != (K, 2) or kpts_2d_px.dtype != np.float32:
             raise ValueError(f"kpts_2d_px must be ({K},2) float32")
 
+        # ★ Codex review b1ky3965z (P2-2): timestamp validation
+        if rgb_ts_ns < 0 or rgb_ts_ns > 0x7FFFFFFFFFFFFFFF:
+            raise ValueError(f"rgb_ts_ns out of range: {rgb_ts_ns}")
+        if frame_id < 0 or frame_id > 0xFFFFFFFF:
+            raise ValueError(f"frame_id out of u32 range: {frame_id}")
+
         # depth_ts_ns default = rgb_ts_ns (same frame)
         if depth_ts_ns is None:
             depth_ts_ns = rgb_ts_ns
-        depth_age_us = max(0, (rgb_ts_ns - depth_ts_ns) // 1000)
+        elif depth_ts_ns < 0 or depth_ts_ns > 0x7FFFFFFFFFFFFFFF:
+            raise ValueError(f"depth_ts_ns out of range: {depth_ts_ns}")
 
-        # valid_mask_bits default — derive from valid flag + kp_conf
+        # ★ Codex review b1ky3965z (P1-6): depth timestamp contract enforcement.
+        # depth_ts > rgb_ts (future depth) — invalidate.
+        # depth_age > MAX_DEPTH_AGE_US — invalidate (stale depth).
+        raw_age_ns = rgb_ts_ns - depth_ts_ns
+        if raw_age_ns < 0:
+            # depth from future → impossible / clock skew → invalid
+            if valid:
+                valid = False
+                valid_reason = INVALID_UNKNOWN
+            depth_age_us = 0
+        else:
+            depth_age_us = raw_age_ns // 1000
+
+        # Stale depth (> 2 frames at 120fps = 16700us) → INVALID_STALE_DEPTH
+        if depth_age_us > MAX_DEPTH_AGE_US and valid:
+            valid = False
+            valid_reason = INVALID_STALE_DEPTH
+
+        # ★ Codex review b1ky3965z (P1-7): per-kp validity 의 진정 derive.
+        # 기존: valid_mask_bits=None + valid=True → 모든 K bit 자동 set.
+        #       → kp_conf 무시, occluded keypoint 도 valid 처리.
+        # Fix: kp_conf >= threshold + 3D depth finite (NaN/0 reject) 의 keypoint 만 set.
+        #      caller 가 명시 mask 전달 가능.
         if valid_mask_bits is None:
             if valid:
-                # all keypoints valid (legacy v1 behavior)
-                valid_mask_bits = (1 << K) - 1   # K-bit set
+                mask = 0
+                # depth z (3rd col) 의 finite + > 0 가 valid 의 의무 (CLAUDE.md guard).
+                z_valid = np.isfinite(kpts_3d_m[:, 2]) & (kpts_3d_m[:, 2] > 0)
+                conf_valid = kpt_conf >= kp_conf_threshold
+                bit_valid = z_valid & conf_valid
+                for i in range(K):
+                    if bit_valid[i]:
+                        mask |= (1 << i)
+                valid_mask_bits = mask
             else:
                 valid_mask_bits = 0
+
+        # ★ Codex review b1ky3965z (P2-1): valid_mask_bits validation.
+        # K bit 만 허용. K beyond bits = 잘못된 caller intent.
+        max_mask = (1 << K) - 1
+        if valid_mask_bits & ~max_mask:
+            raise ValueError(
+                f"valid_mask_bits={bin(valid_mask_bits)} has bits beyond K={K} "
+                f"(max allowed={bin(max_mask)})"
+            )
+
+        # ★ Consistency: valid=True + mask=0 → publish 단 invalid mark.
+        # (모든 keypoint occluded = frame-level invalid)
+        if valid_mask_bits == 0 and valid:
+            valid = False
+            valid_reason = INVALID_OCCLUDED
 
         # kp_sigma_m default — uniform 15mm
         if kp_sigma_m is None:

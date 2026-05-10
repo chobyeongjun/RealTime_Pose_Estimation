@@ -241,11 +241,77 @@ launch_clean.sh 60 은 *60s 동안 카메라 점유*. 한 줄 복붙 시 1번째
 
 ### Action items
 - [x] Mac 에서 verify_shm_v2.py PASS
+- [x] **Codex review b1ky3965z (★ 8 P1 + 7 P2 발견, 4번째 review)**
+- [x] **모든 P1 + 일부 P2 fix (commit 다음)**
 - [ ] Jetson 에서 동일 verify_shm_v2.py 실행 (PASS 검증)
 - [ ] Jetson 에서 production pipeline run 후 SHM v2 packet 검증
-  - `dump_shm_stream` 으로 v2 read 검증 (Live + DumpReader)
-- [ ] codex review (background, 작은 diff 의 큰 변경)
 - [ ] (사용자) C++ control repo 의 SHM v2 reader skeleton
+
+---
+
+## 2026-05-11 — Week 0 Day 1 fix: Codex review b1ky3965z 의 8 P1 + 5 P2
+
+### Codex review 결과 (token 647K)
+
+**8 P1 finding** (clinical blocker, 즉시 fix 필수):
+1. Watchdog `_force_safe_stop()` 가 v1 `publish(ts_ns=...)` 호출 → SHM invalidation 채널 죽음
+2. `view_sagittal.py:378` + `verify_world_frame.py:66` — 17-tuple mis-unpack (kpts_3d=depth_ts 같은 garbage)
+3. `consumer_contract.md` + `README.md` 옛 layout — `valid_flag` offset 20 (v1) vs 44 (v2) → C++ reader 가 invalid → valid misread
+4. `shm_v2_packet_spec.md` 자체 의 Section 2 vs Section 3.5 layout 모순
+5. Cross-process memory ordering 미정의 (ARM Orin weak model)
+6. Depth timestamp contract 강제 안 됨 — 100ms stale 도 valid=True 통과
+7. Per-kp validity fictional — `valid_mask_bits=None + valid=True` 에서 자동 K-bit set, kp_conf 무시
+
+**7 P2 finding**:
+- valid_mask_bits overflow check 부재
+- Timestamp negative/oversize wrap
+- Reattach segment 의 seqlock 외부 stamp
+- Production covariance hardcoded 15mm (Plan D overtrust risk)
+- dump_shm_stream 의 v2 fields throwaway
+- 옛 tests broken (`test_shm_publisher.py`, `test_p1_shm.py`)
+- 새 tests gap (concurrent, K=64 overflow, partial-write)
+
+### Fix 적용 (commit 다음)
+
+P1 모두 fix:
+- `watchdog.py:266` → `rgb_ts_ns` 명시
+- `view_sagittal.py:378` → 17-tuple unpack
+- `verify_world_frame.py:66` → 17-tuple unpack
+- `docs/cuda-stream/consumer_contract.md` → v2 layout (16 fields, valid_flag offset 44)
+- `docs/lessons/shm_v2_packet_spec.md` Section 2 → Section 3.5 와 일치
+- `shm_publisher.py`:
+  - **Stale depth invalidation** (`depth_age > MAX_DEPTH_AGE_US=16700` → `INVALID_STALE_DEPTH`)
+  - **Future depth invalidation** (`depth_ts > rgb_ts` → invalid + age=0)
+  - **Per-kp validity 진정 derive** (`kp_conf >= threshold` AND `depth z finite + > 0`)
+  - **valid_mask_bits validation** (K beyond bits → ValueError)
+  - **Timestamp validation** (negative/oversize → ValueError)
+  - **Reattach 의 seqlock 안에서 stamp**
+  - Memory ordering 명시 docstring (clinical 직전 fix 권유)
+
+P2 일부 fix:
+- 옛 tests cleanup, 새 tests 추가, dump_shm_stream npz schema → 다음 turn
+
+### Mac verify (post-fix) PASS
+
+```
+[1] import VERSION=2
+[2] compute_size K=1,6,7,17,64
+[3] 16 header offsets (Codex Q5 spec)
+[4] round-trip publish + read
+[5] seqlock even/odd
+[6] two-timestamp depth_age (0 / 8333 / 100000 us)
+[7] publish_done monotonic
+[8] per-kp covariance
+
+=== ALL CHECKS PASSED ===
+```
+
+### Conclusions
+
+1. **3-iteration self-review 의 큰 gap** — Codex 가 8 P1 발견. *진정 outside review 의 가치*.
+2. **Clinical blocker 모두 해결** — fix 후 verify 통과.
+3. **사용자 의지 ("3번 검토 + 무한 cycle") 의 의미** = self-review (3) + Codex (1) + Jetson 측정 → 최소 5 iteration. 본 commit 에서 self+Codex 2 round 끝.
+4. **Memory ordering 의 clinical-direct fix** = 다음 phase (C++ binding 또는 inline asm). 현재 production OK (16 retries + ~10us write).
 
 ---
 

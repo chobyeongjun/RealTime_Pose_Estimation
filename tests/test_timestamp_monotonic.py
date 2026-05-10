@@ -133,25 +133,93 @@ class TestDepthAgeConsistency:
             pub.close()
             reader.close()
 
-    def test_depth_age_large_stale(self, shm_name, sample_data):
-        """depth_ts = rgb_ts - 100ms → depth_age_us == 100000."""
+    def test_depth_age_large_stale_invalidates(self, shm_name, sample_data):
+        """Codex review b1ky3965z P1-6 fix: depth_age > 16700us → INVALID_STALE_DEPTH.
+
+        100ms stale 은 *2 frames > MAX_DEPTH_AGE_US* (16700us).
+        publisher 가 자동으로 valid=False, valid_reason=INVALID_STALE_DEPTH.
+        """
+        from perception.CUDA_Stream.shm_publisher import (
+            INVALID_STALE_DEPTH, MAX_DEPTH_AGE_US,
+        )
         K = sample_data["K"]
         pub = ShmPublisher(K, name=shm_name, create=True)
         reader = ShmReader(name=shm_name, expected_k=K)
         try:
             rgb_ts = 1_000_000_000
-            depth_ts = rgb_ts - 100_000_000     # 100ms stale
+            depth_ts = rgb_ts - 100_000_000     # 100ms stale (>> MAX_DEPTH_AGE_US)
             pub.publish(
                 frame_id=1, rgb_ts_ns=rgb_ts,
                 kpts_3d_m=sample_data["kpts_3d"],
                 kpt_conf=sample_data["kp_conf"],
                 kpts_2d_px=sample_data["kpts_2d"],
-                box_conf=0.9, valid=True,
+                box_conf=0.9, valid=True,    # caller 의 의지는 valid 단 publisher 가 invalidate
                 depth_ts_ns=depth_ts,
             )
             result = reader.read()
             depth_age_us = result[3]
+            valid = result[10]
+            valid_reason = result[14]
+            valid_mask_bits = result[16]
+            # depth_age_us 정확 계산
             assert depth_age_us == 100_000
+            # ★ stale 자동 invalidation
+            assert valid is False, f"valid should be False for stale depth, got {valid}"
+            assert valid_reason == INVALID_STALE_DEPTH, (
+                f"valid_reason should be INVALID_STALE_DEPTH ({INVALID_STALE_DEPTH}), "
+                f"got {valid_reason}"
+            )
+            assert valid_mask_bits == 0
+        finally:
+            pub.close()
+            reader.close()
+
+    def test_depth_age_within_budget(self, shm_name, sample_data):
+        """depth_age <= MAX_DEPTH_AGE_US (16700us) → valid 유지."""
+        from perception.CUDA_Stream.shm_publisher import MAX_DEPTH_AGE_US
+        K = sample_data["K"]
+        pub = ShmPublisher(K, name=shm_name, create=True)
+        reader = ShmReader(name=shm_name, expected_k=K)
+        try:
+            rgb_ts = 1_000_000_000
+            depth_ts = rgb_ts - 8_333_333    # 1 frame at 120fps (within budget)
+            pub.publish(
+                frame_id=1, rgb_ts_ns=rgb_ts,
+                kpts_3d_m=sample_data["kpts_3d"],
+                kpt_conf=sample_data["kp_conf"],
+                kpts_2d_px=sample_data["kpts_2d"],
+                box_conf=0.9, valid=True, depth_ts_ns=depth_ts,
+            )
+            result = reader.read()
+            depth_age_us = result[3]
+            valid = result[10]
+            # within budget → valid 유지
+            assert depth_age_us <= MAX_DEPTH_AGE_US
+            assert valid is True
+        finally:
+            pub.close()
+            reader.close()
+
+    def test_depth_ts_future_invalidates(self, shm_name, sample_data):
+        """depth_ts > rgb_ts (future) → invalid (clock skew)."""
+        K = sample_data["K"]
+        pub = ShmPublisher(K, name=shm_name, create=True)
+        reader = ShmReader(name=shm_name, expected_k=K)
+        try:
+            rgb_ts = 1_000_000_000
+            depth_ts = rgb_ts + 1_000_000   # depth from "future"
+            pub.publish(
+                frame_id=1, rgb_ts_ns=rgb_ts,
+                kpts_3d_m=sample_data["kpts_3d"],
+                kpt_conf=sample_data["kp_conf"],
+                kpts_2d_px=sample_data["kpts_2d"],
+                box_conf=0.9, valid=True, depth_ts_ns=depth_ts,
+            )
+            result = reader.read()
+            depth_age_us = result[3]
+            valid = result[10]
+            assert depth_age_us == 0   # clamped
+            assert valid is False, "future depth should invalidate"
         finally:
             pub.close()
             reader.close()

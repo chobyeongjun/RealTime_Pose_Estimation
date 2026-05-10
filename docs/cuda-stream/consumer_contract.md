@@ -8,20 +8,50 @@
 
 ## 발행 채널 (CUDA_Stream 측이 제공)
 
-### 1) SHM — `/dev/shm/hwalker_pose_cuda`
+### 1) SHM — `/dev/shm/hwalker_pose_cuda` (v2, 2026-05-11)
+
+★ Codex orchestration `bvfvkxo1m` 이후 v2 schema (Plan D EKF input contract).
+v1 reader 가 v2 packet 받으면 **fail-fast** (RuntimeError, safe fallback).
+
+자세한 spec: `docs/lessons/shm_v2_packet_spec.md`. C++ #pragma pack struct 동 spec.
+
+**Header 64B (v2)**:
 
 | offset | size | 타입 | 의미 |
 |-------:|-----:|:---:|-----|
-| 0  | 4   | uint32 | seqlock counter (짝수일 때 stable) |
-| 4  | 4   | uint32 | frame_id |
-| 8  | 8   | uint64 | ts_ns |
-| 16 | 4   | float  | box_conf |
-| 20 | 4   | uint32 | **valid_flag (0 = 무효, safe-stop)** |
-| 24 | 204 | float×51 | kpts_3d_m (17×3, meter) |
-| 228| 68  | float×17 | kpt_conf |
-| 296| 136 | float×34 | kpts_2d_px (17×2) |
+| 0  | 4   | uint32 | seqlock counter (짝수=stable) |
+| 4  | 4   | uint32 | **version (== 2)** |
+| 8  | 4   | uint32 | num_keypoints (K, 1..64) |
+| 12 | 4   | uint32 | frame_id |
+| **16** | **8**   | **uint64** | **rgb_ts_ns (★ T_N, RGB capture)** |
+| **24** | **8**   | **uint64** | **depth_ts_ns (★ T_{N-1} or T_N)** |
+| **32** | **4**   | **uint32** | **depth_age_us = (rgb_ts - depth_ts) / 1000** |
+| 36 | 4   | float  | box_conf |
+| 40 | 4   | float  | depth_invalid_ratio |
+| **44** | **1**   | **uint8** | **valid_flag (★ offset 20 → 44, v1 reader 의 misread risk)** |
+| 45 | 1   | uint8  | world_frame (0=cam, 1=world) |
+| 46 | 1   | uint8  | valid_reason (VALID_REASON_* enum) |
+| 47 | 1   | uint8  | ts_domain (0=CLOCK_REALTIME) |
+| 48 | 8   | uint64 | publish_done_mono_ns |
+| **56** | **8**   | **uint64** | **valid_mask_bits (★ per-kp validity)** |
 
-seqlock 프로토콜은 `shm_publisher.ShmReader.read()` 참고.
+**Body** (offset 64+, K-dependent):
+- float[K][3] kpts_3d_m   (offset 64)
+- float[K][2] kpts_2d_px  (offset 64 + K*12)
+- float[K]    kp_conf     (offset 64 + K*20)
+- float[K][3] kp_sigma_m       ★ per-kp depth uncertainty (m)
+- float[K][3] pose_cov_diag    ★ per-kp pose covariance diag
+
+**Total**: HEADER_SIZE + K*48 (aligned 64B). K=6 → 384 bytes.
+
+**Critical changes from v1**:
+- `valid_flag` offset 20 → **44** (v1 reader misread risk — `invalid → valid`)
+- `ts_ns` 단일 → `rgb_ts_ns` + `depth_ts_ns` + `depth_age_us` (Plan D stale depth 처리)
+- `version` field 추가 (mismatch 시 reader fail-fast)
+- per-kp `valid_mask_bits` (single `valid_flag` 부족 보충)
+- per-kp `kp_sigma_m`, `pose_cov_diag` (EKF measurement R)
+
+seqlock 프로토콜: `shm_publisher.ShmReader.read()` 참고.
 
 ### 2) Estop sentinel — `/dev/shm/hwalker_pose_cuda_estop`
 

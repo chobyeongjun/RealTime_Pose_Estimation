@@ -263,9 +263,12 @@ class StreamWatchdog:
                 zeros3 = np.zeros((K, 3), dtype=np.float32)
                 zeros1 = np.zeros((K,), dtype=np.float32)
                 zeros2 = np.zeros((K, 2), dtype=np.float32)
+                # SHM v2 (Codex review b1ky3965z P1-1 fix, 2026-05-11):
+                # rgb_ts_ns 명시. valid=False + valid_mask_bits=0 → 모든 keypoint invalid.
+                # valid_reason 명시 안 하면 publisher 가 INVALID_UNKNOWN default.
                 self.publisher.publish(
                     frame_id=0,
-                    ts_ns=time.time_ns(),
+                    rgb_ts_ns=time.time_ns(),
                     kpts_3d_m=zeros3,
                     kpt_conf=zeros1,
                     kpts_2d_px=zeros2,
