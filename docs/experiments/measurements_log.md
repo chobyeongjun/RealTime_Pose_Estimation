@@ -214,9 +214,75 @@ launch_clean.sh 60 은 *60s 동안 카메라 점유*. 한 줄 복붙 시 1번째
 
 ### Action items
 - [x] 측정 + 분석 + 기록
-- [ ] BRIDGE_CORES env 의 production default 결정 (env 미설정 권장)
+- [x] BRIDGE_CORES env 의 production default 결정 (env 미설정 권장)
 - [ ] V4L2 formats 추가 검증
-- [ ] V4L2 prototype 시작 (다음 turn)
+- [ ] **One-frame-late depth thread implement (Week 1, -10~11ms 권장)**
+- [ ] V4L2 prototype 시작 (Week 2-3)
+
+---
+
+## 2026-05-10 — Bridge_p99 Root Cause Deep Analysis (commit `1e2b105`+)
+
+### Anti-correlation pattern 발견
+
+이전 측정의 verbose log 의 sub-step 분석:
+
+| frame type | grab | ret_rgb | ret_depth | sum |
+|---|---|---|---|---|
+| Type A (block early) | **10.7** | 0.7 | **1.3** | 12.7 |
+| Type B (block late)  | 2.6 | 2.1 | **9.2** | 13.9 |
+| Type A | **10.6** | 0.6 | **1.4** | 12.6 |
+| Type B | 2.7 | 1.9 | **9.1** | 13.7 |
+
+→ **`grab` 과 `ret_depth` 가 anti-correlated**. 합 항상 ~12-14ms. ZED SDK 가 *어디서 wait 할지* 만 결정 — *총 depth pipeline work fixed*.
+
+### Root cause
+
+```
+ZED SDK 의 grab() 행동:
+  if (이전 frame 의 depth pipeline 진행 중) {
+      block;              // grab=10ms
+      depth 즉시 가용;    // ret_depth=1.3ms
+  } else {
+      즉시 return;        // grab=2.5ms
+      depth 백그라운드;   // ret_depth=9ms (wait)
+  }
+```
+
+→ bridge_p99 = ZED SDK 의 depth pipeline 총 work (~12-13ms). **CPU affinity 와 무관**.
+
+### One-frame-late depth thread = 진정한 lever
+
+```
+Current (hot path 13ms):
+  grab → ret_rgb → ret_depth (block) → bridge done
+
+One-frame-late (hot path 2.5ms):
+  Main thread:    grab → ret_rgb → depth=queue.pop() ★
+  Worker thread:  retrieve_measure (background, queue.push())
+```
+
+| 항목 | 변화 |
+|---|---|
+| bridge_p99 | 13.6 → 2-3ms (-10~11ms) |
+| Depth age | +8.3ms (1 frame stale) |
+| Knee peak angular error | ~2.5° (300°/s × 0.0083s) — 무시 가능 |
+| **Net effective latency** | **-2~3ms** |
+| Jitter 제거 | bimodal → consistent fast path |
+
+### Codex consult background `bn57396zt`
+
+8 questions:
+1. ZED SDK 5.2.1 Camera thread-safety (single object, multi-thread retrieve)
+2. One-frame-late architecture spec (worker lifecycle, queue type)
+3. Pyzed Python GIL release (vs C++ binding 필요?)
+4. Timestamp matching (RGB N vs depth N-1)
+5. Failure modes + watchdog
+6. TDD test design
+7. Path A (one-frame-late) vs Path B (V4L2) 비교
+8. Implementation skeleton (zed_gpu_bridge.py + pipeline.py)
+
+→ 답 받으면 TDD red phase 작성 + green implement.
 
 ---
 
