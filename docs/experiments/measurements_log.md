@@ -270,19 +270,59 @@ One-frame-late (hot path 2.5ms):
 | **Net effective latency** | **-2~3ms** |
 | Jitter 제거 | bimodal → consistent fast path |
 
-### Codex consult background `bn57396zt`
+### Codex consult `bn57396zt` 답 (token 287634, 2026-05-10)
 
-8 questions:
-1. ZED SDK 5.2.1 Camera thread-safety (single object, multi-thread retrieve)
-2. One-frame-late architecture spec (worker lifecycle, queue type)
-3. Pyzed Python GIL release (vs C++ binding 필요?)
-4. Timestamp matching (RGB N vs depth N-1)
-5. Failure modes + watchdog
-6. TDD test design
-7. Path A (one-frame-late) vs Path B (V4L2) 비교
-8. Implementation skeleton (zed_gpu_bridge.py + pipeline.py)
+**brutal honest 발견**:
 
-→ 답 받으면 TDD red phase 작성 + green implement.
+Q1 (ZED Thread Safety): **검증 필요, 가정 X**
+- 공식 ZED SDK doc 에 *concurrent grab + retrieve_measure 보장 X*
+- Stereolabs forum: video settings get/set 만 thread-safe (좁음)
+- Logical race: worker retrieve_measure 중 main grab() → depth 가 어느 frame 의 것인지 *undefined*
+
+Q3 (Pyzed Python): **C++ binding 권장 가능**
+- pybind11 GIL release 명시 X
+- patient experiment 이면 minimal C++ binding (gil_scoped_release + thread lifecycle)
+
+Q4 (Timestamp): **Two timestamps + EKF covariance inflate**
+- rgb_ts = T_N, depth_ts = T_{N-1}, depth_age = ~8.33ms
+- Plan D EKF 가 처리: bearing(T_N) + range/depth(T_{N-1}) 분리 OR pose(T_N) + cov inflated by sigma_velocity * 8.33ms
+
+Q5 (Watchdog): **Stale fail closed**
+- Worst case: fresh 2D + stale depth = plausible but wrong 3D
+- Age > 2 frames → publish invalid (stale reuse 절대 X)
+
+Q7 (★ 결정적): **Kill-test first**
+> "Path A has best ROI only if Q1 is resolved in 1-2 days. If not, **it is a trap**."
+> "**Recommended sequencing: Week 1 day 1-2 build a kill-test for Path A**.
+>  If frame association or p99 target fails, **stop. Week 1 onward go Path B (V4L2)**."
+
+Q8 (정확한 변경 위치):
+- ZEDFrame (zed_gpu_bridge.py:107) — depth fields 추가
+- Bridge state (line 187) — worker, CV, DepthPacket
+- Start/stop worker (line 484, 497)
+- Remove main-thread depth retrieval (line 682, 781)
+- pipeline.py:36 (FrameMeta) — depth_ts/age extension
+
+### Falsification gate (Codex Q6) — 4 조건 모두 pass 해야 Path A 진행
+
+| Gate | 조건 |
+|---|---|
+| G1 | Frame association: depth_frame_id 가 rgb_frame_id - 1 (consistent, ≥95%) |
+| G2 | bridge_proc_p99 < 4 ms |
+| G3 | depth_age_p99 < 16.7 ms (2 frames at 120fps) |
+| G4 | Stale rate < 5% |
+
+**모두 pass → Path A implement (Day 3-7)**
+**하나라도 fail → 즉시 Path B (V4L2 + VPI)**
+
+### Kill-test script: scripts/kill_test_one_frame_late.py
+
+Minimal experiment (60s):
+- Main thread: grab + retrieve_image (RGB hot path)
+- Worker thread: retrieve_measure → DepthPacket queue (depth async)
+- Falsification gate 자동 평가 + PASS/FAIL 출력
+
+→ 사용자 측정 후 paste 받으면 결정.
 
 ---
 
