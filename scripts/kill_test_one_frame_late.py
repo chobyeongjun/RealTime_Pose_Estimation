@@ -79,10 +79,18 @@ def main():
     args = ap.parse_args()
 
     import sys
-    # Force unbuffered logging (sudo + tee 조합 buffer 회피)
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-                        stream=sys.stdout, force=True)
+    # Force unbuffered logging (sudo + tee 조합 buffer 회피).
+    # logging 의 internal handler buffer 가 python -u 와 별도 — explicit flush 필요.
+    class FlushHandler(logging.StreamHandler):
+        def emit(self, record):
+            super().emit(record)
+            self.flush()
+
+    handler = FlushHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    logging.root.handlers = [handler]
+    logging.root.setLevel(logging.INFO)
     sys.stdout.reconfigure(line_buffering=True)
 
     # Signal handler — 어떤 종료 원인 인지 명시
