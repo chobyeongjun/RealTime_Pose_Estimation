@@ -80,31 +80,44 @@ launch_clean.sh 60 은 *60s 동안 카메라 점유*. 한 줄 복붙 시 1번째
 
 ---
 
-## CPU affinity Notes (2026-05-10)
+## CPU affinity Notes (2026-05-10) — 진정 정정
 
-### 현재 conflict
-- CLAUDE.md: C++ cores 6-7
-- commit 69f918d: BRIDGE_CORES="6,7"
-- → **같은 cores**. C++ 실행 시 bridge starvation risk.
+### 진정한 환경 정정 (사용자 정확 지적)
+
+**현재 상태**:
+- C++ Teensy 통신 = **미실행** (의도 spec 만, 실제 안 돔)
+- 즉 cores 6-7 의 reservation = **낭비 가능**
+- cores 0-1 = Xorg + nvargus-daemon (CLAUDE.md "GMSL = EGL=X 필수")
+- → vision pipeline 이 **cores 1-7 (7 cores) 자유 사용 가능**
+
+**미래 상태 (C++ Teensy 시작 후)**:
+- C++ control loop = cores 6-7 점유 (RT FIFO 90)
+- bridge thread + Python = cores 2-5 분리 필요
+- → 그때 commit 69f918d 의 BRIDGE 6,7 = conflict
 
 ### Architecture
-- Jetson Orin NX = 8x ARM Cortex-A78AE (homogeneous)
-- 모든 cores 동일 (P/E core 구분 없음)
-- L3 2MB shared
-- *core 그룹 = NUMA/cache locality + RT priority 충돌 회피* 의미만
+- Jetson Orin NX 16GB = 8x Cortex-A78AE (homogeneous, P/E 구분 X)
+- L1 64KB I+D / L2 256KB / L3 2MB shared
+- core 그룹 = cache locality + RT priority 충돌 회피 의미만
 
-### 측정 예정 — 6 cases
-- A) no_env
-- B) BRIDGE 6,7 RT 80 (현재)
-- C) BRIDGE 4,5 RT 80 (분리, 정답 후보)
-- D) BRIDGE 4 RT 80 (single, deterministic)
-- E) BRIDGE 0,1 RT 80 (system 충돌 risk)
-- F) BRIDGE 6,7 RT 99 (C++ 보다 high)
+### 측정 예정 — 8 cases (commit `ce07b9f` 의 6 → 8 확장)
+
+| case | bridge config | 의미 |
+|---|---|---|
+| A | no env | kernel inherit, 가장 가까운 baseline |
+| B | 6,7 RT 80 | commit 69f918d (C++ cores 와 동일) |
+| C | 4,5 RT 80 | C++ 와 분리, Python 의 일부 |
+| D | 4 RT 80 | single core deterministic |
+| E | 0,1 RT 80 | system cores 충돌 risk |
+| F | 6,7 RT 99 | C++ 보다 high (위험) |
+| **G** | **2,3,4,5,6,7 RT 80** | **★ 현재 환경 best — 모든 vision cores 자유** |
+| **H** | **2,3 RT 80** | **Python 와 같은 cores — cache locality 검증** |
 
 ### 검증 가설
-- C 또는 D 가 best (C++ 와 분리)
-- B 와 F 는 C++ 실행 시 latency 회귀
-- E 는 system service 와 충돌
+- 현재 환경 (C++ X): G 또는 H 가 best (cache locality)
+- 미래 환경 (C++ O): C 또는 D 가 best (분리)
+- B / F = C++ 실행 시 latency 회귀
+- E = system service 충돌
 
 ---
 

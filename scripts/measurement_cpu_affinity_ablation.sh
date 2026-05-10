@@ -5,13 +5,15 @@
 # commit 69f918d 의 BRIDGE_CORES="6,7" 가 *같은 cores* 사용 → C++ 실행 시 충돌.
 # 환자 실험 시 latency 회귀 risk. 측정으로 진짜 정답 결정.
 #
-# 6 cases (각 60s, sleep 15s 사이):
-#   A) no_env       — BRIDGE 환경 변수 미설정 (kernel inherit)
-#   B) br67_rt80    — BRIDGE 6,7 RT 80 (현재 commit 69f918d, C++ cores 와 동일)
+# 8 cases (각 60s, sleep 15s 사이):
+#   A) no_env       — BRIDGE 환경 변수 미설정 (kernel inherit) — 가장 가까운 baseline
+#   B) br67_rt80    — BRIDGE 6,7 RT 80 (commit 69f918d, C++ cores 와 동일)
 #   C) br45_rt80    — BRIDGE 4,5 RT 80 (Python cores 의 일부, C++ 와 분리)
 #   D) br4_rt80     — BRIDGE 4 single RT 80 (deterministic)
-#   E) br01_rt80    — BRIDGE 0,1 RT 80 (system cores 와 충돌 risk)
-#   F) br67_rt99    — BRIDGE 6,7 RT 99 (C++ 의 90 보다 high — bridge 가 C++ 우선)
+#   E) br01_rt80    — BRIDGE 0,1 RT 80 (system cores Xorg/nvargus 충돌 risk)
+#   F) br67_rt99    — BRIDGE 6,7 RT 99 (C++ 의 90 보다 high — bridge 가 C++ 우선, 위험)
+#   G) br2to7_rt80  — BRIDGE 2,3,4,5,6,7 RT 80 (★ 현재 환경 best — 모든 vision cores 자유)
+#   H) br23_rt80    — BRIDGE 2,3 RT 80 (Python 와 같은 cores — cache locality 검증)
 #
 # 모든 case 는 production default flags 사용:
 #   --no-constraints --strict-correctness --zed-cuda-interop --post-async
@@ -42,7 +44,7 @@ echo "============================================================"
 echo "  CPU affinity + RT priority ablation (6 cases)"
 echo "  output dir : ${OUTDIR}"
 echo "  commit     : $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-echo "  60s × 6 + sleep × 5 = ~6.5 min"
+echo "  60s × 8 + sleep × 7 = ~9 min"
 echo "============================================================"
 echo ""
 
@@ -90,6 +92,12 @@ run_case "E_br01_rt80"  'BRIDGE_CORES="0,1" BRIDGE_RT_PRIO=80'
 
 # F — high RT priority (C++ 보다 high)
 run_case "F_br67_rt99"  'BRIDGE_CORES="6,7" BRIDGE_RT_PRIO=99'
+
+# G — 모든 vision cores 자유 (현재 환경 best, C++ X)
+run_case "G_br2to7_rt80" 'BRIDGE_CORES="2,3,4,5,6,7" BRIDGE_RT_PRIO=80'
+
+# H — Python 와 같은 cores (cache locality 검증)
+run_case "H_br23_rt80"   'BRIDGE_CORES="2,3" BRIDGE_RT_PRIO=80'
 
 # =====================================================================
 # Summary
