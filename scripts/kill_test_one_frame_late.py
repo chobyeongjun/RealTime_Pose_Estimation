@@ -78,8 +78,20 @@ def main():
                     help="warmup frames (skip stats)")
     args = ap.parse_args()
 
+    import sys
+    # Force unbuffered logging (sudo + tee 조합 buffer 회피)
     logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+                        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+                        stream=sys.stdout, force=True)
+    sys.stdout.reconfigure(line_buffering=True)
+
+    # Signal handler — 어떤 종료 원인 인지 명시
+    import signal
+    def signal_handler(signum, frame):
+        LOGGER.error(f"signal {signum} received → graceful exit")
+        sys.exit(130)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     LOGGER.info("=== Kill-test: ZED multi-thread + One-frame-late ===")
     LOGGER.info(f"  duration={args.duration}s, warmup={args.warmup} frames")
@@ -169,10 +181,23 @@ def main():
     stats: list[FrameStats] = []
     rgb_frame_id = 0
     t_start = time.time()
+    grab_fail_count = 0
+    LOGGER.info(f"[main] entering loop, duration={args.duration}s")
 
     while time.time() - t_start < args.duration:
         t0 = time.perf_counter()
-        if zed.grab(rt) != sl.ERROR_CODE.SUCCESS:
+        try:
+            grab_result = zed.grab(rt)
+        except Exception as e:
+            LOGGER.error(f"[main] grab() exception: {e}")
+            grab_fail_count += 1
+            time.sleep(0.001)
+            continue
+
+        if grab_result != sl.ERROR_CODE.SUCCESS:
+            grab_fail_count += 1
+            if grab_fail_count <= 3 or grab_fail_count % 100 == 0:
+                LOGGER.warning(f"[main] grab fail #{grab_fail_count}: {grab_result}")
             time.sleep(0.001)
             continue
         t_grab = time.perf_counter()
@@ -215,6 +240,13 @@ def main():
         ))
 
         rgb_frame_id += 1
+
+        # Progress log every 200 frames (~1.5s at 120fps)
+        if rgb_frame_id % 200 == 0:
+            LOGGER.info(f"[main] frame {rgb_frame_id} elapsed={time.time()-t_start:.1f}s "
+                        f"bridge={bridge_proc_ms:.2f}ms depth_age={depth_age_ms:.2f}ms")
+
+    LOGGER.info(f"[main] loop exit. total_frames={rgb_frame_id}, grab_fail={grab_fail_count}")
 
     # Stop worker
     worker_stop.set()
