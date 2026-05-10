@@ -112,7 +112,12 @@ class StreamManager:
         # wait for infer to fully release SMs (measured post=7ms incl wait).
         # Equal priority lets the SM scheduler interleave overlapping work
         # across frames the way the 3-stage pipeline was designed to.
-        high = set(high_priority_stages or list(STAGE_NAMES))
+        # A.3 (2026-05-10): None → all stages high. [] → 모두 low (baseline ablation).
+        # 명시적 list → 그 stages만 high. or-falsy 트랩 회피 (빈 list 도 정확).
+        if high_priority_stages is None:
+            high = set(STAGE_NAMES)
+        else:
+            high = set(high_priority_stages)
         lo_prio, hi_prio = torch.cuda.Stream.priority_range()
         self.streams: Dict[str, StreamBundle] = {}
         for name in STAGE_NAMES:

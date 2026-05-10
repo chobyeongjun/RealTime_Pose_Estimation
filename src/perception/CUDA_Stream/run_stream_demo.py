@@ -169,6 +169,33 @@ def parse_args() -> argparse.Namespace:
         help="γ Phase — ZED CUDA interop (shared_ctx path). "
              "ZED MEM::GPU + DLPack zero-copy. bridge_proc 14.4→8-10ms 추정.",
     )
+    # A.3 (Codex consult 2026-05-10) — GPU stream priority ablation.
+    # 현재 hardcoded `high_priority_stages=["infer"]` 를 flag 화 — off/infer-only/all-high
+    # 비교로 priority lever 의 *실제 효과* 검증. Codex falsification: priority 모드 변경 시
+    # inf_ms / pipeline_proc p99 차이 없으면 lever 효과 없음 (이미 active 상태 → 0ms 가능).
+    ap.add_argument(
+        "--gpu-stream-priority",
+        choices=["off", "infer-only", "all-high"],
+        default="infer-only",
+        help="A.3 — CUDA stream priority. "
+             "off=모든 stages low (baseline), "
+             "infer-only=infer만 high (현재 default, hardcoded 였음), "
+             "all-high=모든 stages high. "
+             "stream_manager.py:115 가 high_priority_stages 인자에 따라 매핑.",
+    )
+    ap.add_argument(
+        "--post-fusion", action="store_true",
+        help="A.2 — fused post kernel (un-letterbox + 3D lift + EMA candidate single Triton kernel). "
+             "post 7-step sequential (~7ms) → fused (~3-4ms 예상). "
+             "Codex falsification: post p99 < 1.5ms 개선 안 되면 효과 없음. "
+             "(★ NEXT — gpu_postprocess_fused.py 미작성 시 ImportError 로 fail-fast.)",
+    )
+    ap.add_argument(
+        "--graph-extended", action="store_true",
+        help="A.4 — CUDA graph 확장 (post 까지 capture). "
+             "*--post-fusion 필수* (current post 가 graph-hostile scalar paths). "
+             "Codex falsification: extended_graph_eager > 0 또는 actual_publish p99 변화 없음.",
+    )
     # Codex R4 Q5 — sweep ablation 측정 시 constraints OFF 강제 (.item() 잔여 host
     # sync 가 post_async 효과 mask). lpost-ablation 와 별개 — flag combination
     # 의 모든 case 에 명시적으로 적용 가능.
@@ -184,7 +211,20 @@ def parse_args() -> argparse.Namespace:
         help="Runtime assert: frame_id 단조 / tick.ts == tick.meta.ts / "
              "valid=True 시 budget 검증. fail 시 즉시 stop.",
     )
-    return ap.parse_args()
+    args = ap.parse_args()
+    # A.2 / A.4 fail-fast — 미구현 lever 가 silent ignore 되지 않게 (Codex consult Q1, 2026-05-10).
+    if args.post_fusion:
+        raise SystemExit(
+            "--post-fusion: A.2 Triton kernel 미구현 (next PR). "
+            "Codex Q1 spec — gpu_postprocess_fused.py 작성 필요. "
+            "현재는 flag plumbing 만 (phase_a_sweep.sh case 3-8 의 스펙 보존)."
+        )
+    if args.graph_extended:
+        raise SystemExit(
+            "--graph-extended: A.4 미구현 (next PR — A.2 의존). "
+            "current post 가 graph-hostile scalar paths — fusion 후에만 capture 가능."
+        )
+    return args
 
 
 def maybe_set_affinity(spec: str) -> None:
@@ -298,7 +338,19 @@ def main() -> int:
 
     device = torch.device("cuda:0")
     schema = get_schema(args.schema)
-    sm = StreamManager(device=device, high_priority_stages=["infer"])
+    # A.3 (2026-05-10) — flag 기반 stream priority ablation.
+    # off=모두 low, infer-only=infer만 high (기존 hardcoded 동일), all-high=모두 high.
+    if args.gpu_stream_priority == "off":
+        _high_stages: list[str] | None = []
+    elif args.gpu_stream_priority == "all-high":
+        _high_stages = None
+    else:
+        _high_stages = ["infer"]
+    LOGGER.info(
+        "StreamManager priority — %s (high_stages=%s)",
+        args.gpu_stream_priority, _high_stages if _high_stages else "ALL",
+    )
+    sm = StreamManager(device=device, high_priority_stages=_high_stages)
     runner = TRTRunner(args.engine, device=device)
     # Match preproc dtype to engine's input binding — Ultralytics engines
     # with --half still keep I/O as float32 by default, so probing here

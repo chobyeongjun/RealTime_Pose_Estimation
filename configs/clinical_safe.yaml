@@ -1,0 +1,44 @@
+# Clinical Safe Configuration — Track B production rollback baseline.
+# Codex consult 2026-05-10 Q8 — minimum-risk path for patient experiment.
+#
+# Usage:
+#   sudo BRIDGE_CORES="6,7" BRIDGE_RT_PRIO=80 \
+#       bash src/perception/CUDA_Stream/launch_clean.sh 60 \
+#       --zed-cuda-interop --post-async --gpu-stream-priority infer-only
+
+engine: src/perception/CUDA_Stream/yolo26s-lower6-v2.engine
+
+# Production-safe flags (12-case sweep 검증, p99 = 61.81ms baseline).
+flags:
+  - --zed-cuda-interop
+  - --post-async
+  - --gpu-stream-priority=infer-only
+
+# 절대 금지 flags (Codex consult Q1 falsification 또는 영구 기각).
+forbidden:
+  - --frame-overlap        # 12-case 측정 +10-15ms 회귀 (DEPRECATED 2026-05-10)
+  - --use-filter           # One Euro Filter 영구 기각 (joints 0/6)
+  - --depth-mode=NEURAL    # TRT GPU SM contention (CLAUDE.md 영구 기각)
+  - --depth-mode=NEURAL_LIGHT
+  - --imgsz=480            # 사용자 영구 거부
+
+# Hard limits (CLAUDE.md).
+hard_limits:
+  imgsz: 640
+  depth_mode: PERFORMANCE
+  copy_depth: true         # zero-copy = ZED 내부 buffer race
+  cpp_loop_hz_min: 100
+  cpp_e2e_p99_ms_max: 20   # C++ 의 hard limit (vision_proc 와 별개)
+
+# Bridge resource (commit 69f918d).
+env:
+  BRIDGE_CORES: "6,7"      # bridge thread CPU affinity
+  BRIDGE_RT_PRIO: "80"     # SCHED_FIFO priority
+
+# 환자 실험 D-day 자격 기준 (Codex Q5 transition criteria).
+production_acceptance:
+  true_e2e_p99_ms_max: 55
+  actual_publish_p99_ms_max: 57
+  bridge_p99_ms_max: 14
+  valid_rate_min: 0.99
+  duration_s_min: 300
