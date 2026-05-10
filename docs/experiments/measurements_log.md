@@ -156,11 +156,76 @@ launch_clean.sh 60 은 *60s 동안 카메라 점유*. 한 줄 복붙 시 1번째
 
 ## TODO — 다음 측정
 
-1. **CPU affinity ablation** (이번 turn 의 script) — 6 case
-2. **Validation 측정** (production default = all-high 1 case, statistical 검증)
-3. **bridge resource 효과 재측정** (case 2 의 zed_lag 27 outlier 재현 여부)
-4. (Week 2-3) **ZED RawBuffer + sparse stereo prototype** 측정
-5. (Week 2-3, 사용자) **C++ EKF predictor** 의 phase residual 검증
+1. **CPU affinity ablation** (8-case, commit b8c33df)
+2. **Validation 측정** (production default = all-high 1 case)
+3. **V4L2 formats 검증** (`v4l2-ctl --list-formats-ext`)
+4. (Week 2-3) **V4L2 + VPI sparse stereo prototype** (RawBuffer 대체)
+5. (Week 2-3, 사용자) **C++ EKF predictor** phase residual 검증
+
+---
+
+## 2026-05-10 — Jetson Environment Audit (commit `b8c33df`)
+
+### Setup
+- L4T R36.4.7 (JetPack 6.2, 2025-09 build)
+- jetson_clocks ON, nvpmodel MAXN, GPU 918MHz, CPU 1.984GHz × 8
+
+### Software stack
+
+| Package | Version |
+|---|---|
+| ZED SDK | 5.2.1 |
+| stereolabs-zedlink-mono | 1.4.0 (MAX9296) |
+| pyzed | OK (Python binding) |
+| PyTorch | 2.10.0 + CUDA 12.6 |
+| CuPy | 14.0.1 + CUDA 12.9 (minor mismatch) |
+| **VPI** | **3.2.4 + python3.10-vpi3** ★ |
+| Triton | **미설치** (A.2 fusion 은 PyTorch fallback 만) |
+
+### 결정적 발견 — V4L2 path 가능
+
+```
+ZED SDK pyzed binding:
+  Camera methods (raw/buffer): []  ← RawBuffer Python 노출 X
+  Mat methods: ['update_cpu_from_gpu', 'update_gpu_from_cpu']
+  MEM types: BOTH, CPU, GPU
+
+V4L2 (kernel level):
+  /dev/video0 (left), /dev/video1 (right)
+  zedx 10-0020 (platform:tegra-capture-vi:1)
+  → driver cleanly exposes the sensors
+  → V4L2 raw capture 가능 (Codex Q1a 권장 path 의 정확한 만족)
+```
+
+→ **ZED SDK 우회의 진정한 path = V4L2 + VPI 활용** (RawBuffer 대안).
+
+### CPU 사용 패턴 (사용자 정확)
+
+```
+nvargus-daemon  PSR=4  3.6% CPU
+gnome-shell     PSR=3  0.3% CPU
+update-manager  PSR=7  0.3% CPU
+nxrunner.bin    PSR=3  0.1% CPU
+systemd 등      cpu0-7 분산 (near idle)
+Xorg            top 5s sample 에 안 보임 (거의 idle)
+```
+
+→ **system 가 어느 specific cores 도 점유 안 함**. 모든 cores 0-7 *대부분 idle*.
+→ **vision pipeline 이 cores 1-7 자유 사용 가능** (cpu0 만 systemd init 양보 권장).
+→ CLAUDE.md 의 cores 0-1 system reservation = *과도한 가정*, 실제 system load 0% 가까움.
+
+### Conclusions
+
+1. **CPU 정정**: 현재 환경 (C++ X) 에서 cores 1-7 모두 vision 자유
+2. **V4L2 path 가능**: pyzed RawBuffer 노출 안 됨 단 V4L2 가 더 직접 접근
+3. **VPI 3.2.4 설치됨**: sparse stereo prototype 의 ISP/rectify 활용 가능
+4. **Triton 미설치**: A.2 fusion = PyTorch fallback 만 (Codex Q4 의 "Triton 효과 작음" 과 일치, drop list 강화)
+
+### Action items
+- [x] 환경 영구 기록
+- [ ] V4L2 formats 추가 검증 (`v4l2-ctl --list-formats-ext /dev/video0`)
+- [ ] CPU affinity 8-case sweep (script `measurement_cpu_affinity_ablation.sh`)
+- [ ] 측정 결과 entry 추가
 
 ---
 
