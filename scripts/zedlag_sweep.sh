@@ -98,7 +98,8 @@ case "$ROUND" in
         # Codex R4 Q5 fix: 모든 case 에 --no-constraints 강제 (lpost case 도
         # 명시적). constraints.py:.item() 잔여 host sync 제거 → post_async 의
         # 진짜 효과 측정 가능. 또 --strict-correctness 로 runtime race 즉시 catch.
-        local COMMON_FLAGS="--no-constraints --strict-correctness"
+        # NOTE: ``local`` 은 함수 내부만 — case 문 안 일반 변수 선언.
+        COMMON_FLAGS="--no-constraints --strict-correctness"
         run_case "00_baseline"               $COMMON_FLAGS
         run_case "01_overlap_only"           $COMMON_FLAGS --frame-overlap
         run_case "02_async_only"             $COMMON_FLAGS --post-async
