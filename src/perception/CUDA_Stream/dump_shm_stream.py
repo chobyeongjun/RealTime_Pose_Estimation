@@ -114,22 +114,32 @@ class DumpReader:
             self.idx = 0
         i = self.idx
         self.idx += 1
-        # P1 (2026-05-06): 12-tuple to match live ShmReader. The npz files
-        # don't have publish_done_mono_ns / valid_reason / ts_domain (they
-        # were written before P1), so default to 0/UNKNOWN/EPOCH.
+        # v2 (2026-05-11): 17-tuple matching live ShmReader (Codex orchestration
+        # bvfvkxo1m). Legacy npz files (v1) 는 rgb_ts == ts_ns 로 fallback,
+        # depth_ts == rgb_ts (same-frame), 새 fields default 값.
+        K = int(self.kpts_3d.shape[1]) if self.kpts_3d.ndim == 3 else 6
+        ts_ns = int(self.ts_ns[i])
+        kpts_3d = self.kpts_3d[i].astype(np.float32, copy=False)
+        kp_conf = self.kpt_conf[i].astype(np.float32, copy=False)
+        valid = bool(self.valid[i])
         return (
             int(self.frame_id[i]),
-            int(self.ts_ns[i]),
-            self.kpts_3d[i].astype(np.float32, copy=False),
-            self.kpt_conf[i].astype(np.float32, copy=False),
+            ts_ns,                                          # rgb_ts_ns
+            ts_ns,                                          # depth_ts_ns (same-frame fallback)
+            0,                                              # depth_age_us
+            kpts_3d,
+            kp_conf,
             self.kpts_2d[i].astype(np.float32, copy=False),
+            np.full((K, 3), 0.015, dtype=np.float32),       # kp_sigma_m default
+            np.full((K, 3), 0.015 ** 2, dtype=np.float32),  # pose_cov_diag default
             float(self.box_conf[i]),
-            bool(self.valid[i]),
+            valid,
             float(self.depth_inv_ratio[i]),
             bool(self.world_frame_applied[i]),
-            0,    # publish_done_mono_ns — not recorded in older dumps
-            0,    # valid_reason = VALID_OK (best-effort default)
-            0,    # ts_domain = epoch
+            0,                                              # publish_done_mono_ns
+            0,                                              # valid_reason
+            0,                                              # ts_domain
+            ((1 << K) - 1) if valid else 0,                # valid_mask_bits
         )
 
     def close(self) -> None:
@@ -201,10 +211,16 @@ def main() -> int:
             if data is None:
                 time.sleep(0.001)
                 continue
-            # P1: ShmReader returns 12-tuple now; this dumper only needs the
-            # first 9 fields (publish_done/valid_reason/ts_domain are not
-            # archived in the .npz format yet).
-            frame_id, ts_ns, kpts_3d, kpt_conf, kpts_2d, box_conf, valid, depth_inv, world_frame_applied = data[:9]
+            # v2 (2026-05-11): ShmReader returns 17-tuple. dumper 는 npz format
+            # 호환 위해 *legacy fields 만* archive (rgb_ts → ts_ns).
+            # 진정 quality dataset (kp_sigma_m / pose_cov_diag) 는
+            # dump_quality_dataset.py (Week 0 다음 작업) 가 처리.
+            (frame_id, rgb_ts_ns, _depth_ts_ns, _depth_age_us,
+             kpts_3d, kpt_conf, kpts_2d, _kp_sigma, _pose_cov,
+             box_conf, valid, depth_inv, world_frame_applied,
+             _publish_done, _valid_reason, _ts_domain,
+             _valid_mask_bits) = data
+            ts_ns = rgb_ts_ns   # legacy field name 유지
             if frame_id == last_frame_id:
                 dup_skipped += 1
                 time.sleep(0.001)

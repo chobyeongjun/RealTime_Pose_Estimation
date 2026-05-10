@@ -159,14 +159,19 @@ launch_clean.sh 60 은 *60s 동안 카메라 점유*. 한 줄 복붙 시 1번째
 ## TODO — 다음 작업 (★ Codex orchestration `bvfvkxo1m` 후 정정)
 
 ### Week 0 (이번 주, 3-4일) — SHM v2 + Quality Harness (Critical Path)
-1. ✓ SHM v2 spec 문서 (`docs/lessons/shm_v2_packet_spec.md`)
+1. ✓ SHM v2 spec 문서 (`docs/lessons/shm_v2_packet_spec.md`) — C++ struct 추가
 2. ✓ Master plan 문서 (`docs/lessons/master_plan_2026_05.md`)
-3. SHM v2 publisher implement (`shm_publisher.py` v2)
-4. Quality dataset dump (`dump_quality_dataset.py`)
-5. Stress quality gate (`stress_quality_gate.py`)
-6. Mocap RMSE eval (`eval_mocap_pose_rmse.py`)
-7. Tests (`test_plan_d_packet_schema.py`, `test_timestamp_monotonic.py`)
-8. (사용자) SHM v2 reader skeleton (control repo)
+3. ✓ SHM v2 publisher implement (`shm_publisher.py` v2, 17-tuple read)
+4. ✓ run_stream_demo.py:824 publish 호출 v2 update
+5. ✓ dump_shm_stream.py v2 호환 (DumpReader + Live unpacking)
+6. ✓ tests/conftest.py (pytest PYTHONPATH 자동)
+7. ✓ tests/test_plan_d_packet_schema.py (binary layout, round-trip, edge cases)
+8. ✓ tests/test_timestamp_monotonic.py (publish_done monotonic, depth_age 정확)
+9. ✓ scripts/verify_shm_v2.py (single command 통합 검증, **Mac PASS**)
+10. Quality dataset dump (`dump_quality_dataset.py`) — next
+11. Stress quality gate (`stress_quality_gate.py`) — next
+12. Mocap RMSE eval (`eval_mocap_pose_rmse.py`) — next
+13. (사용자) SHM v2 reader skeleton (control repo C++) — next
 
 ### Week 1 — Quality Dataset + Plan D L1+L2 (병렬)
 - Mocap/markered dataset 수집
@@ -186,6 +191,61 @@ launch_clean.sh 60 은 *60s 동안 카메라 점유*. 한 줄 복붙 시 1번째
 - ✗ One-frame-late depth thread (kill_test silent exit + ZED thread-safety 미증명)
 - ✗ CPU affinity 추가 측정 (noise 영역)
 - ✗ Dense ZED bypass / full libargus rewrite
+
+---
+
+## 2026-05-11 — Week 0 Day 1: SHM v2 implement + verify (Mac PASS)
+
+### Setup
+- Mac development (no CUDA / pyzed needed for SHM v2 verify)
+- Python 3 + numpy + struct + multiprocessing (built-in)
+
+### Implementation
+- `shm_publisher.py` v1 → v2 (rewrite with VERSION=2)
+- `run_stream_demo.py:824` publish 호출 v2 (rgb_ts_ns + 새 default fields)
+- `dump_shm_stream.py` DumpReader + Live unpacking → 17-tuple
+- `tests/conftest.py` (pytest PYTHONPATH 자동)
+- `tests/test_plan_d_packet_schema.py` (15+ tests)
+- `tests/test_timestamp_monotonic.py` (5+ tests)
+- `scripts/verify_shm_v2.py` (single-command 통합 검증)
+
+### 3-iteration self-review 발견 fix
+- **Iter 1 (Correctness)**: Header 64B layout 검증 ✓
+- **Iter 2 (Edge cases)**: 3 fix:
+  - tests/conftest.py 작성 (pytest PYTHONPATH 자동)
+  - shm_name fixture per-test 격리 (PID + test name)
+  - shm_v2_packet_spec.md 에 C++ struct 추가
+- **Iter 3 (Plan D compat)**: C++ #pragma pack struct 64-byte exact 검증
+
+### Verify 결과 (Mac, `python3 scripts/verify_shm_v2.py`)
+
+```
+[1] import shm_publisher           ✓ VERSION=2
+[2] compute_size K=1,6,7,17,64     ✓ all match (after K=64 expected fix 3200→3136)
+[3] header offsets                 ✓ 16 fields match Codex Q5 spec
+[4] round-trip publish + read      ✓ 12 checks
+[5] seqlock even/odd               ✓ 5 publishes, monotonic
+[6] two-timestamp depth_age        ✓ 0 / 8333 / 100000 us
+[7] publish_done_mono              ✓ 10 publishes strictly increasing
+[8] per-kp covariance              ✓ custom kp_sigma + auto pose_cov
+
+=== ALL CHECKS PASSED ===
+```
+
+### Conclusions
+
+1. **Mac 검증 통과** — Jetson 으로 push 후 *동일 verify* 검증.
+2. **Codex Q5 spec 정확** — Two timestamps + per-kp covariance + valid_mask_bits 모두 implement.
+3. **Backward compat clean break** — version=2, v1 reader 가 v2 packet 받으면 RuntimeError (safe fallback).
+4. **사용자 control repo (C++) 의 reader prereq** — `shm_v2_packet_spec.md` 의 C++ struct 활용.
+
+### Action items
+- [x] Mac 에서 verify_shm_v2.py PASS
+- [ ] Jetson 에서 동일 verify_shm_v2.py 실행 (PASS 검증)
+- [ ] Jetson 에서 production pipeline run 후 SHM v2 packet 검증
+  - `dump_shm_stream` 으로 v2 read 검증 (Live + DumpReader)
+- [ ] codex review (background, 작은 diff 의 큰 변경)
+- [ ] (사용자) C++ control repo 의 SHM v2 reader skeleton
 
 ---
 

@@ -149,6 +149,69 @@ depth measurement 의 *3D 위치 의 표준편차*. EKF 가 measurement noise R 
 
 ---
 
+## 3.5 C++ Reader Struct (사용자 control repo)
+
+```cpp
+// 사용자 control repo 의 reader 가 직접 사용.
+// memcpy 또는 reinterpret_cast 로 SHM buffer 의 header 부분 mapping.
+
+#pragma pack(push, 1)
+struct PlanDPacketHeaderV2 {
+    uint32_t seq;                       // even=stable, odd=write
+    uint32_t version;                   // == 2
+    uint32_t num_keypoints;             // K (1..64)
+    uint32_t frame_id;
+    uint64_t rgb_ts_ns;                 // T_N (RGB capture, CLOCK_REALTIME)
+    uint64_t depth_ts_ns;               // T_{N-1} or T_N (same frame)
+    uint32_t depth_age_us;              // (rgb_ts - depth_ts) / 1000
+    float    box_conf;
+    float    depth_invalid_ratio;
+    uint8_t  valid_flag;                // derived from valid_mask_bits
+    uint8_t  world_frame;               // 0=cam, 1=world (IMU rotated)
+    uint8_t  valid_reason;              // VALID_REASON_* enum
+    uint8_t  ts_domain;                 // 0=CLOCK_REALTIME
+    uint64_t publish_done_mono_ns;      // CLOCK_MONOTONIC
+    uint64_t valid_mask_bits;           // per-kp validity (bit i = keypoint i)
+};
+#pragma pack(pop)
+static_assert(sizeof(PlanDPacketHeaderV2) == 64,
+              "PlanD v2 header must be exactly 64 bytes");
+
+// Body (variable, K-dependent):
+//   float kpts_3d_m[K][3]      offset = 64
+//   float kpts_2d_px[K][2]     offset = 64 + K*12
+//   float kp_conf[K]           offset = 64 + K*12 + K*8
+//   float kp_sigma_m[K][3]     offset = 64 + K*12 + K*8 + K*4
+//   float pose_cov_diag[K][3]  offset = 64 + K*12 + K*8 + K*4 + K*12
+
+// Reader pseudocode (seqlock retry):
+//   for retry in [1..16]:
+//       seq0 = atomic_load(header->seq)
+//       if seq0 & 1: continue  // write in progress
+//       memcpy(local_header, header, sizeof(PlanDPacketHeaderV2))
+//       memcpy(local_body, body, K * 48)  // K*(3+2+1+3+3)*4
+//       seq1 = atomic_load(header->seq)
+//       if seq0 == seq1 && (seq0 & 1) == 0:
+//           return OK
+//   return STALE
+```
+
+VALID_REASON_* enum (control repo 와 동기):
+```cpp
+enum {
+    VALID_OK              = 0,
+    INVALID_NO_DETECTION  = 1,
+    INVALID_OCCLUDED      = 2,
+    INVALID_BUDGET_EXCEED = 3,
+    INVALID_CONSTRAINT    = 4,
+    INVALID_WARMUP        = 5,
+    INVALID_STALE_DEPTH   = 6,
+    INVALID_DRIFT         = 7,
+    INVALID_THERMAL       = 8,
+    INVALID_UNKNOWN       = 255,
+};
+```
+
 ## 4. Backward Compatibility
 
 | 시점 | C++ reader | 행동 |

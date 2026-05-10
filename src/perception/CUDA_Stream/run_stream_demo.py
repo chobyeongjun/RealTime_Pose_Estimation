@@ -821,9 +821,16 @@ def main() -> int:
                 else:
                     valid_reason = INVALID_UNKNOWN
 
+                # SHM v2 publish (Codex orchestration bvfvkxo1m, 2026-05-11):
+                # - rgb_ts_ns + depth_ts_ns 분리 (one-frame-late path 대비)
+                # - 현재 same-frame path: depth_ts_ns = rgb_ts_ns (depth_age_us = 0)
+                # - valid_mask_bits = None → publisher 가 valid + K-bit auto derive
+                # - kp_sigma_m / pose_cov_diag = None → DEFAULT_SIGMA_M (15mm) 적용
+                #   진정 per-kp covariance 추정 = Phase 추가 작업 (depth confidence,
+                #   stereo disparity subpixel uncertainty 활용)
                 publisher.publish(
                     frame_id=tick.frame_id,
-                    ts_ns=tick.ts_ns,
+                    rgb_ts_ns=tick.ts_ns,                # T_N (RGB capture)
                     kpts_3d_m=kpts_3d,
                     kpt_conf=kpt_conf,
                     kpts_2d_px=kpts_2d,
@@ -832,6 +839,10 @@ def main() -> int:
                     depth_invalid_ratio=tick.result.depth_invalid_ratio,
                     world_frame_applied=tick.world_frame_applied,
                     valid_reason=valid_reason,
+                    # depth_ts_ns=None → same-frame (default)
+                    # valid_mask_bits=None → auto derive (default)
+                    # kp_sigma_m=None → uniform 15mm default
+                    # pose_cov_diag=None → kp_sigma_m² default
                 )
                 # actual control-visible latency: from camera exposure to
                 # SHM publish complete. Only collect post-warmup so stats
