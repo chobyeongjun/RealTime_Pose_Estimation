@@ -94,19 +94,24 @@ case "$ROUND" in
         #   00_baseline ~65 / 03_overlap_async ~42-50 / 07_all_lever_old ~42-50 /
         #   08_interop_only ~60 (-5 bridge) / ★ 11_all_lever_new ~35-45 (best)
         # 측정 시간: 12 case × 25s ≈ 5분
-        run_case "00_baseline"               ""
-        run_case "01_overlap_only"           --frame-overlap
-        run_case "02_async_only"             --post-async
-        run_case "03_overlap_async"          --frame-overlap --post-async
-        run_case "04_lpost_only"             --lpost-ablation
-        run_case "05_overlap_lpost"          --frame-overlap --lpost-ablation
-        run_case "06_async_lpost"            --post-async --lpost-ablation
-        run_case "07_all_lever_old"          --frame-overlap --post-async --lpost-ablation
+        #
+        # Codex R4 Q5 fix: 모든 case 에 --no-constraints 강제 (lpost case 도
+        # 명시적). constraints.py:.item() 잔여 host sync 제거 → post_async 의
+        # 진짜 효과 측정 가능. 또 --strict-correctness 로 runtime race 즉시 catch.
+        local COMMON_FLAGS="--no-constraints --strict-correctness"
+        run_case "00_baseline"               $COMMON_FLAGS
+        run_case "01_overlap_only"           $COMMON_FLAGS --frame-overlap
+        run_case "02_async_only"             $COMMON_FLAGS --post-async
+        run_case "03_overlap_async"          $COMMON_FLAGS --frame-overlap --post-async
+        run_case "04_lpost_only"             $COMMON_FLAGS --lpost-ablation
+        run_case "05_overlap_lpost"          $COMMON_FLAGS --frame-overlap --lpost-ablation
+        run_case "06_async_lpost"            $COMMON_FLAGS --post-async --lpost-ablation
+        run_case "07_all_lever_old"          $COMMON_FLAGS --frame-overlap --post-async --lpost-ablation
         # γ Phase (Codex R5) — ZED CUDA interop 추가 4 case
-        run_case "08_interop_only"           --zed-cuda-interop
-        run_case "09_interop_overlap"        --zed-cuda-interop --frame-overlap
-        run_case "10_interop_async"          --zed-cuda-interop --post-async
-        run_case "11_all_lever_new"          --zed-cuda-interop --frame-overlap --post-async --lpost-ablation
+        run_case "08_interop_only"           $COMMON_FLAGS --zed-cuda-interop
+        run_case "09_interop_overlap"        $COMMON_FLAGS --zed-cuda-interop --frame-overlap
+        run_case "10_interop_async"          $COMMON_FLAGS --zed-cuda-interop --post-async
+        run_case "11_all_lever_new"          $COMMON_FLAGS --zed-cuda-interop --frame-overlap --post-async --lpost-ablation
         ;;
     *)
         echo "ERROR: unknown round '${ROUND}'. Use {fps|exposure|depth|sensing|combinations}"

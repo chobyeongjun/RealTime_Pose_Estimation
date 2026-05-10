@@ -166,8 +166,22 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--zed-cuda-interop", action="store_true",
         help="γ Phase — ZED CUDA interop (shared_ctx path). "
-             "ZED MEM::GPU + DLPack zero-copy. bridge_proc 14.4→8-10ms 추정. "
-             "현재 STUB — Codex R5 응답 후 _grab_one + _upload 구현 시 활성.",
+             "ZED MEM::GPU + DLPack zero-copy. bridge_proc 14.4→8-10ms 추정.",
+    )
+    # Codex R4 Q5 — sweep ablation 측정 시 constraints OFF 강제 (.item() 잔여 host
+    # sync 가 post_async 효과 mask). lpost-ablation 와 별개 — flag combination
+    # 의 모든 case 에 명시적으로 적용 가능.
+    ap.add_argument(
+        "--no-constraints", action="store_true",
+        help="constraints stack 명시적 OFF (sweep 측정 시 Codex R4 권고). "
+             "constraints.py:.item() 의 host sync 잔여 제거.",
+    )
+    # Codex review 발견 — runtime correctness assert 측정. log parsing 으로
+    # 검증 못 하는 frame_id 단조 / ts 일치 / valid over-budget 즉시 catch.
+    ap.add_argument(
+        "--strict-correctness", action="store_true",
+        help="Runtime assert: frame_id 단조 / tick.ts == tick.meta.ts / "
+             "valid=True 시 budget 검증. fail 시 즉시 stop.",
     )
     return ap.parse_args()
 
@@ -306,14 +320,18 @@ def main() -> int:
         post_async=args.post_async,           # Phase 5 D1 (Codex R4)
     )
     stack = ConstraintStack()
-    # L_post Phase 0: constraints OFF (Codex Round 6 권장). They call .item()
-    # internally which would defeat the post .cpu() removal. Re-enable in
-    # production after L_post Phase 1 (overlap) lands.
-    if args.lpost_ablation:
+    # constraints OFF 조건 (Codex R4 Q5 권고):
+    #   --lpost-ablation : 기존 (post_async 와 별개로 sticky/EMA/constraints 모두 OFF)
+    #   --no-constraints : NEW — sweep ablation 시 명시적 OFF. constraints.py 의
+    #                      .item() host sync 잔여가 post_async 효과 mask 하지 않게.
+    constraints_disabled = args.lpost_ablation or args.no_constraints
+    if constraints_disabled:
         if args.bone_constraint or args.velocity_bound_mps > 0:
+            reason = "lpost-ablation" if args.lpost_ablation else "no-constraints"
             LOGGER.warning(
-                "--lpost-ablation: ignoring --bone-constraint / "
-                "--velocity-bound-mps (constraints disabled in ablation mode)"
+                "--%s: ignoring --bone-constraint / --velocity-bound-mps "
+                "(constraints stack disabled, .item() host sync 잔여 제거)",
+                reason,
             )
     else:
         if args.bone_constraint:
@@ -482,6 +500,10 @@ def main() -> int:
     frame_skip_count = 0
     _last_stats_t = time.monotonic()
     STATS_INTERVAL_S = 10.0   # print rolling stats every 10s
+    # Codex review fix — runtime correctness check (--strict-correctness).
+    # log parsing 으로 catch 못 하는 race 즉시 raise.
+    _strict_prev_frame_id = -1
+    HARD_LIMIT_TRUE_E2E_MS = 200.0   # over-budget assertion threshold (ms)
     try:
         while not stop_flag["stop"]:
             if time.monotonic() - t0 > args.duration:
@@ -497,6 +519,28 @@ def main() -> int:
                 frame_skip_count += 1
                 continue
             ticks += 1
+            # Codex strict-correctness — runtime assert.
+            if args.strict_correctness:
+                # 1) frame_id 단조 증가 (P4D1 latest-only pickup 시 N → N+k 가능, k>=1)
+                assert tick.frame_id > _strict_prev_frame_id, (
+                    f"frame_id not strictly increasing: "
+                    f"{_strict_prev_frame_id} → {tick.frame_id}"
+                )
+                _strict_prev_frame_id = tick.frame_id
+                # 2) ts 일치 (P1D1 contract — meta 가 ground truth)
+                if tick.meta is not None:
+                    assert tick.ts_ns == tick.meta.ts_ns, (
+                        f"ts mismatch: tick.ts_ns={tick.ts_ns} "
+                        f"meta.ts_ns={tick.meta.ts_ns}"
+                    )
+                # 3) over-budget 시 valid=False 강제 (publish 직전 다시 체크하므로
+                #    여기는 *비현실적 over-budget* 만 catch — system clock 이상 등)
+                _now_ms = (time.time_ns() - tick.ts_ns) / 1e6
+                if tick.result.valid and _now_ms > HARD_LIMIT_TRUE_E2E_MS:
+                    raise AssertionError(
+                        f"valid=True but true_e2e {_now_ms:.1f}ms > "
+                        f"HARD_LIMIT {HARD_LIMIT_TRUE_E2E_MS}ms (frame {tick.frame_id})"
+                    )
             e2e_ms = tick.latency_ms["e2e"]
             true_e2e_ms = tick.latency_ms.get("true_e2e_ms", float("nan"))
             # Decomposition keys (added by pipeline.py for diagnostic visibility)
