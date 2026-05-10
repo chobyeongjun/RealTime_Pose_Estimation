@@ -14,6 +14,7 @@ in a ``deque(maxlen=2)`` with a lock — stale frames are dropped.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -524,6 +525,37 @@ class ZEDGpuBridge:
     # Hot path
     # ------------------------------------------------------------------
     def _capture_loop(self) -> None:
+        # Phase C — Bridge thread resource (Codex R5 권장).
+        # 환경 변수 BRIDGE_CORES (예: "6,7") 로 affinity 명시 — pipeline
+        # cores 2-5 와 분리해 GIL/CPU contention 줄임. production 시 C++
+        # control loop 가 6-7 사용하면 BRIDGE_CORES 비우거나 다른 cores.
+        # SCHED_FIFO RT priority 80 (pipeline 90 보다 한 단계 낮게).
+        bridge_cores_env = os.environ.get("BRIDGE_CORES", "").strip()
+        if bridge_cores_env:
+            try:
+                cores = [int(c) for c in bridge_cores_env.split(",") if c.strip()]
+                if cores:
+                    os.sched_setaffinity(0, cores)
+                    LOGGER.info(
+                        "bridge thread CPU affinity = %s (cores)", cores
+                    )
+            except (ValueError, OSError) as err:
+                LOGGER.warning("BRIDGE_CORES=%r 적용 실패: %s", bridge_cores_env, err)
+        bridge_rt_prio = int(os.environ.get("BRIDGE_RT_PRIO", "0"))
+        if bridge_rt_prio > 0:
+            try:
+                os.sched_setscheduler(
+                    0, os.SCHED_FIFO, os.sched_param(bridge_rt_prio)
+                )
+                LOGGER.info(
+                    "bridge thread SCHED_FIFO priority = %d", bridge_rt_prio
+                )
+            except (PermissionError, OSError) as err:
+                LOGGER.warning(
+                    "BRIDGE_RT_PRIO=%d 적용 실패 (root 필요): %s",
+                    bridge_rt_prio, err,
+                )
+
         while not self._stop_event.is_set():
             try:
                 frame = self._grab_one()
