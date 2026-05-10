@@ -156,11 +156,67 @@ launch_clean.sh 60 은 *60s 동안 카메라 점유*. 한 줄 복붙 시 1번째
 
 ## TODO — 다음 측정
 
-1. **CPU affinity ablation** (8-case, commit b8c33df)
-2. **Validation 측정** (production default = all-high 1 case)
-3. **V4L2 formats 검증** (`v4l2-ctl --list-formats-ext`)
-4. (Week 2-3) **V4L2 + VPI sparse stereo prototype** (RawBuffer 대체)
-5. (Week 2-3, 사용자) **C++ EKF predictor** phase residual 검증
+1. ~~**CPU affinity ablation** (8-case)~~ ✓ 완료 (2026-05-10 19:16)
+2. **V4L2 formats 검증** (`v4l2-ctl --list-formats-ext`)
+3. (Week 2-3) **V4L2 + VPI sparse stereo prototype** ★
+4. (Week 2-3, 사용자) **C++ EKF predictor** phase residual 검증
+5. (선택) C++ Teensy 통신 시작 후 CPU affinity 재측정
+
+---
+
+## 2026-05-10 19:05–19:16 — CPU Affinity 8-case Ablation (commit `04550b3`)
+
+### Setup
+- production default flags: `--no-constraints --strict-correctness --zed-cuda-interop --post-async`
+- `--gpu-stream-priority all-high` (default, commit f551dba)
+- 60s × 8 cases, sleep 15s 사이
+- C++ Teensy control = 미실행 (현재 환경 baseline)
+
+### Results (정렬 by true_e2e p99)
+
+| 순위 | case | bridge config | true_e2e p99 (ms) | hz | bridge_p99 | pipeline_p50 | zed_lag |
+|---|---|---|---|---|---|---|---|
+| 1 ★ | D_br4_rt80 | cpu 4 single RT 80 | **60.86** | 56.8 | 13.60 | 15.20 | 21.80 |
+| 2 | A_no_env | (kernel inherit) | 60.90 | 55.7 | 13.70 | 15.50 | 22.20 |
+| 3 | F_br67_rt99 | 6,7 RT 99 | 61.23 | 56.8 | 13.60 | 15.10 | 21.90 |
+| 4 | H_br23_rt80 | 2,3 RT 80 | 61.24 | 54.7 | 13.70 | 15.70 | 22.50 |
+| 5 | B_br67_rt80 | 6,7 RT 80 (commit 69f918d) | 61.31 | 55.0 | 13.60 | 15.60 | 22.60 |
+| 6 | G_br2to7_rt80 | 2-7 RT 80 | 61.56 | 54.3 | 13.60 | 15.80 | 22.70 |
+| 7 | C_br45_rt80 | 4,5 RT 80 | **65.30** | 56.4 | 13.70 | 15.40 | 22.50 |
+| 8 | E_br01_rt80 | 0,1 RT 80 | **67.85** | 55.0 | 13.70 | 15.70 | 23.90 |
+
+### Conclusions ultrathink
+
+1. **CPU affinity 의 *진짜 효과 거의 0***. Best (D 60.86) vs 6 case 평균 (61.0) = 0.14ms 차이 = statistical noise. 1-7 cases 의 상위 6 = 60.86~61.56ms 의 0.7ms 격차 안.
+
+2. **bridge_p99 13.6ms 가 architecture floor** — ZED SDK retrieve_measure 의 depth bimodal 한계 (Codex Q3 검증). CPU 어디 두든 못 줄임.
+
+3. **검증된 가정**:
+   - **E (cores 0-1) +7ms 회귀** ★ — system (systemd/Xorg) 와 RT 80 충돌. CLAUDE.md "GMSL = EGL=X 필수" 의 실제 검증. **cores 0-1 절대 사용 X**.
+   - **C (cores 4-5) +4.4ms 회귀** ★ — env audit 의 nvargus-daemon PSR=4 와 충돌. context switch + cache thrash. **cpu 4 nvargus 양보 권장**.
+
+4. **부정된 가정**:
+   - "Python cores 2-5 / C++ cores 6-7 분리 필수" → 현재 환경 (C++ X) 에선 의미 없음. cores 1-7 모두 자유.
+   - "C 또는 D = best" 가설 → C 는 worst, D 는 marginal best (0.04ms vs A).
+
+5. **production 권장**:
+   - **BRIDGE_CORES env 미설정** = case A = kernel inherit. 가장 단순, near-best.
+   - 또는 BRIDGE_CORES="4" = case D, deterministic single core.
+   - **commit 69f918d 의 BRIDGE_CORES="6,7" 도 OK** (case B = +0.4ms, noise 영역). 단 *낭비 적 reservation*.
+   - **미래 C++ Teensy 시작 후 재측정 필수**.
+
+6. **진짜 lever 는 V4L2 우회**:
+   ```
+   bridge_p99 13.6ms = ZED SDK depth pipeline 한계 (못 줄임)
+   V4L2 직접 + custom sparse stereo = -7~10ms 가능
+   → 진정 game changer (Week 2-3)
+   ```
+
+### Action items
+- [x] 측정 + 분석 + 기록
+- [ ] BRIDGE_CORES env 의 production default 결정 (env 미설정 권장)
+- [ ] V4L2 formats 추가 검증
+- [ ] V4L2 prototype 시작 (다음 turn)
 
 ---
 
