@@ -151,16 +151,41 @@ launch_clean.sh 60 은 *60s 동안 카메라 점유*. 한 줄 복붙 시 1번째
 | 2026-05-10 | Phase A/B/C plan review | 1.5M | Plan D EKF predictor = main path |
 | 2026-05-10 | Predictive + 추가 lever | 0.34M | A.3 priority "이미 active, 효과 0" — falsified by 측정 |
 | 2026-05-10 | ZED bypass + zero-copy + EKF validity | 0.08M | Full bypass abandon, RawBuffer = 2-3주, vision-only EKF = research path |
+| 2026-05-11 | One-frame-late depth thread spec | 0.29M | Kill-test required, ZED thread-safety 미증명, abandon if fail |
+| 2026-05-11 | **Orchestration big picture** ★ | **0.92M** | **Vision repo mission = quality input source. Latency 마지막 1ms = trap. SHM v2 + quality harness = Week 0 critical path. V4L2 = secondary, drop if blocks** |
 
 ---
 
-## TODO — 다음 측정
+## TODO — 다음 작업 (★ Codex orchestration `bvfvkxo1m` 후 정정)
 
-1. ~~**CPU affinity ablation** (8-case)~~ ✓ 완료 (2026-05-10 19:16)
-2. **V4L2 formats 검증** (`v4l2-ctl --list-formats-ext`)
-3. (Week 2-3) **V4L2 + VPI sparse stereo prototype** ★
-4. (Week 2-3, 사용자) **C++ EKF predictor** phase residual 검증
-5. (선택) C++ Teensy 통신 시작 후 CPU affinity 재측정
+### Week 0 (이번 주, 3-4일) — SHM v2 + Quality Harness (Critical Path)
+1. ✓ SHM v2 spec 문서 (`docs/lessons/shm_v2_packet_spec.md`)
+2. ✓ Master plan 문서 (`docs/lessons/master_plan_2026_05.md`)
+3. SHM v2 publisher implement (`shm_publisher.py` v2)
+4. Quality dataset dump (`dump_quality_dataset.py`)
+5. Stress quality gate (`stress_quality_gate.py`)
+6. Mocap RMSE eval (`eval_mocap_pose_rmse.py`)
+7. Tests (`test_plan_d_packet_schema.py`, `test_timestamp_monotonic.py`)
+8. (사용자) SHM v2 reader skeleton (control repo)
+
+### Week 1 — Quality Dataset + Plan D L1+L2 (병렬)
+- Mocap/markered dataset 수집
+- V4L2 formats 검증 (`v4l2-ctl --list-formats-ext`)
+- 사용자: Plan D L1 (const velocity) + L2 (const accel)
+
+### Week 2-3 — V4L2 (option) + Plan D L3
+- V4L2 + VPI sparse stereo (quality gate pass 시만)
+- 사용자: Plan D L3 (phase-locked EKF) + watchdog
+
+### Week 3-4 — Integration
+### Week 4-5 — Stress + Falsification
+### Week 6 — Clinical dry-run + 환자 실험
+
+### ABANDONED (Codex 검증)
+- ✗ A.2 Triton, A.4 graph, B yolo26n, C RTMPose
+- ✗ One-frame-late depth thread (kill_test silent exit + ZED thread-safety 미증명)
+- ✗ CPU affinity 추가 측정 (noise 영역)
+- ✗ Dense ZED bypass / full libargus rewrite
 
 ---
 
