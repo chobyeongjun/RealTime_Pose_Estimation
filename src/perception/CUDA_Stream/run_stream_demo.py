@@ -176,12 +176,14 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--gpu-stream-priority",
         choices=["off", "infer-only", "all-high"],
-        default="infer-only",
+        default="all-high",
         help="A.3 — CUDA stream priority. "
              "off=모든 stages low (baseline), "
-             "infer-only=infer만 high (현재 default, hardcoded 였음), "
-             "all-high=모든 stages high. "
-             "stream_manager.py:115 가 high_priority_stages 인자에 따라 매핑.",
+             "infer-only=infer만 high (이전 hardcoded), "
+             "all-high=모든 stages high (★ 측정 검증 production default). "
+             "측정 (4-case priority ablation 2026-05-10): all-high 가 "
+             "infer-only 대비 p99 -7.7ms 개선 + pipeline_proc -0.7ms. "
+             "stream_manager.py:108 의 'all stages high' 의도와 일치.",
     )
     ap.add_argument(
         "--post-fusion", action="store_true",
