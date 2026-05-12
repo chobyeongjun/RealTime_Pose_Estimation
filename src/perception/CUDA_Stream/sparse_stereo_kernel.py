@@ -1,5 +1,9 @@
 """Custom CUDA sparse stereo — Census 또는 SAD at K keypoints.
 
+⚠️ ARCHIVED (2026-05-12 사용자 결정 C — V4L2 우회 abandon) ⚠️
+알고리즘 self-test PASS (3/3 correct, depth 1.008m, sigma_z 8.4mm @ 1m).
+단 V4L2 path 폐기 → production 미사용. 코드 유지 = future C++ libargus prototype reference.
+
 Codex orchestration Q3 spec (V4L2 우회 path 의 핵심):
 - Block 1 keypoint = 1 thread block
 - Patch (9x9 or 11x11) matching

@@ -1,5 +1,9 @@
 """VPI pipeline — Debayer + Rectify (Jetson only).
 
+⚠️ ARCHIVED (2026-05-12 사용자 결정 C — V4L2 우회 abandon) ⚠️
+build_rectify_maps() 는 별도 사용 가능 (12-coeff Brown-Conrady inverse).
+VPI debayer/remap 은 V4L2 path 폐기로 사용 안 함. 코드 유지 = 학습 + reference.
+
 docs/lessons/v4l2_bypass_plan.md Step 2 + Step 3.
 
 Stack:

@@ -1,19 +1,35 @@
 """V4L2 raw bayer capture — ZED X Mini bypass path (Linux only).
 
-사용자 의지 (정확 + 속도): 4-9주 effort 진행.
-docs/lessons/v4l2_bypass_plan.md Step 1.
+⚠️ ARCHIVED (2026-05-12 사용자 결정 C) ⚠️
 
-Format (2026-05-12 검증):
-    /dev/video0,1 = 'BA10' (10-bit Bayer GRGR/BGBG)
-    960×600 @ 120fps (우리 SVGA path)
+Jetson run #2 (commit dbbc83a) 결과:
+    struct size 정확 (204/88/20) + IOCTL number 정확 (0xC0CC5605)
+    단 tegra-capture-vi driver 가 VIDIOC_S_FMT 거부 (Tegra-level quirk)
+    G_FMT (read-only) PASS, S_FMT (set) ENOTTY
 
-Implementation:
-    - Python ctypes + fcntl + mmap (stdlib only, no v4l2py 의존)
-    - Direct V4L2 IOCTL (open → set format → request buffers → mmap → stream)
-    - 10-bit Bayer unpack (BA10 = 5 bytes / 4 pixels)
-    - L/R sync via frame timestamps
+진정 path = C++ libargus direct (수개월 effort, Python 만으론 어려움).
+사용자 결정 = V4L2 우회 abandon, Plan D EKF 집중 (control repo, phase-locked 예측 -50ms).
 
-⚠️ Linux only. Mac 에선 syntax check 만. Jetson 의무 test.
+코드 유지 이유:
+    1. 학습 (V4L2 ABI, ctypes struct alignment, Tegra quirk 의 진정 발견)
+    2. Future C++ libargus prototype 의 reference (struct definitions)
+    3. Paper의 "investigated but abandoned" engineering decision 의 정직 기록
+
+원본 docstring:
+    사용자 의지 (정확 + 속도): 4-9주 effort 진행.
+    docs/lessons/v4l2_bypass_plan.md Step 1.
+
+    Format (2026-05-12 검증):
+        /dev/video0,1 = 'BA10' (10-bit Bayer GRGR/BGBG)
+        960×600 @ 120fps (우리 SVGA path)
+
+    Implementation:
+        - Python ctypes + fcntl + mmap (stdlib only, no v4l2py 의존)
+        - Direct V4L2 IOCTL (open → set format → request buffers → mmap → stream)
+        - 10-bit Bayer unpack (BA10 = 5 bytes / 4 pixels)
+        - L/R sync via frame timestamps
+
+⚠️ Linux only. Mac 에선 syntax check 만. Jetson 의무 test (ARCHIVED).
 """
 from __future__ import annotations
 

@@ -78,19 +78,34 @@ run_test "1.2 verify_quality_dataset.py (Quality dataset I/O)" \
 run_test "1.3 batch_pose_compute --self-test (synthetic round-trip)" \
     "PYTHONPATH=src python3 scripts/batch_pose_compute.py --self-test 2>&1 | tail -3"
 
-# ── Level 2: V4L2 + VPI + sparse stereo ─────────────────────────────────
+# ── Level 2: V4L2 우회 path (ARCHIVED — 2026-05-12 사용자 결정 C) ────────
+# 사용자 결정 결과 (measurements_log.md "2026-05-12 19:23"):
+#   V4L2 direct IOCTL = tegra-capture-vi driver 의 S_FMT 거부 (Tegra quirk)
+#   진정 path = C++ libargus (수개월) — Python 만으로 어려움
+#   대안 = Plan D EKF (control repo 의 phase-locked 예측 −50ms) = effective 10ms
+# 결정: V4L2 우회 abandon. 단 코드는 archive 유지 (학습 + future research)
+# 이 tests 는 RUN_V4L2_TESTS=1 환경변수 설정 시 만 실행.
 
-run_test "2.1 check_v4l2_capability.sh (V4L2 format detect)" \
-    "bash scripts/check_v4l2_capability.sh 2>&1 | grep -E 'Pixel Format|disto\[|libnvargus|PASS' | head -10"
+if [ "${RUN_V4L2_TESTS:-0}" = "1" ]; then
+    echo ""
+    echo "  ── Level 2: V4L2 우회 (ARCHIVED, RUN_V4L2_TESTS=1) ──"
 
-run_test "2.2 v4l2_capture.py (30-frame bayer smoke)" \
-    "PYTHONPATH=src python3 -m perception.CUDA_Stream.v4l2_capture --device /dev/video0 --n-frames 30 2>&1 | tail -5"
+    run_test "2.1 check_v4l2_capability.sh (V4L2 format detect)" \
+        "bash scripts/check_v4l2_capability.sh 2>&1 | grep -E 'Pixel Format|disto\[|libnvargus|PASS' | head -10"
 
-run_test "2.3 vpi_pipeline.py self-test (build_rectify_maps numpy)" \
-    "PYTHONPATH=src python3 -m perception.CUDA_Stream.vpi_pipeline 2>&1 | tail -5"
+    run_test "2.2 v4l2_capture.py (30-frame bayer smoke — Tegra quirk known)" \
+        "PYTHONPATH=src python3 -m perception.CUDA_Stream.v4l2_capture --device /dev/video0 --n-frames 30 2>&1 | tail -5"
 
-run_test "2.4 sparse_stereo_kernel.py self-test (synthetic stereo, torch 의무)" \
-    "PYTHONPATH=src python3 -m perception.CUDA_Stream.sparse_stereo_kernel 2>&1 | tail -5"
+    run_test "2.3 vpi_pipeline.py self-test (build_rectify_maps numpy)" \
+        "PYTHONPATH=src python3 -m perception.CUDA_Stream.vpi_pipeline 2>&1 | tail -5"
+
+    run_test "2.4 sparse_stereo_kernel.py self-test (synthetic stereo, archive 유지)" \
+        "PYTHONPATH=src python3 -m perception.CUDA_Stream.sparse_stereo_kernel 2>&1 | tail -5"
+else
+    echo ""
+    echo "  ── Level 2: V4L2 우회 SKIPPED (사용자 결정 C: abandon) ──"
+    echo "      Reactivate: RUN_V4L2_TESTS=1 bash scripts/run_all_jetson_tests.sh"
+fi
 
 # ── Summary ─────────────────────────────────────────────────────────────
 
