@@ -399,10 +399,18 @@ def save_session_calib(
                 raise ValueError(f"{cam} missing intrinsic: {k}")
         if "disto" not in cam_dict:
             raise ValueError(f"{cam} missing 'disto' (distortion coeffs)")
-        if not (isinstance(cam_dict["disto"], list) and len(cam_dict["disto"]) == 5):
+        # ZED distortion model:
+        #   - Standard pinhole: 5 (k1, k2, p1, p2, k3)
+        #   - Extended (ZED X wide-FOV): 12 (k1..k6 + p1, p2 + s1..s4)
+        # caller 가 list 형태 + length 4..12 면 허용.
+        disto = cam_dict["disto"]
+        if not isinstance(disto, list):
             raise ValueError(
-                f"{cam}.disto must be length-5 list (ZED model), got "
-                f"{type(cam_dict['disto']).__name__} len={len(cam_dict['disto']) if hasattr(cam_dict['disto'], '__len__') else 'N/A'}"
+                f"{cam}.disto must be list, got {type(disto).__name__}"
+            )
+        if not (4 <= len(disto) <= 12):
+            raise ValueError(
+                f"{cam}.disto length {len(disto)} not in [4, 12] (ZED standard 5 or extended 12)"
             )
 
     with open(output_path, "w") as f:
