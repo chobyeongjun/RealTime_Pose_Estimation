@@ -23,3 +23,5 @@ build/
 # Test/debug outputs (results live in docs/experiments/)
 results/
 data/recordings/
+src/perception/benchmarks/cpp_ext/build/
+src/perception/benchmarks/cpp_ext/*.so
