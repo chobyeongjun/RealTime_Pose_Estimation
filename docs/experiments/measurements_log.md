@@ -470,9 +470,92 @@ P2 일부 fix:
 ### Action items
 - [x] Codex review b5kic9w4n 의 fix 적용
 - [x] Mac verify ALL PASS (8 sections 30+ checks)
-- [ ] Jetson dump 실행 (verify + 10s short test)
+- [x] **Jetson 의무 검증 PASS (verify + 10s dump test)**
 - [ ] (선택) Codex review 6번째 (큰 변경 후 again)
 - [ ] (사용자) C++ control repo 의 SHM v2 reader skeleton
+
+---
+
+## 2026-05-12 09:29 — Week 0 ★ 완전 끝 — Jetson dump_quality_dataset 검증 PASS
+
+### Setup
+- Jetson Orin NX, commit `79a8a26`
+- 10s short dump test, every=5, no right RGB
+- ZED X Mini SVGA@120fps, depth_mode=PERFORMANCE, self-calib disabled
+
+### Results
+
+```
+saved frames   : 58
+grab rate       : 290 grabs / 10s = 29Hz (dump entry, sync retrieve)
+total size      : 82.6 MB (~1.42 MB/frame)
+session_calib  : OK
+  zed_serial         : 52277959
+  baseline_mm        : 49.84 (ZED X Mini 실제 spec ~50mm)
+  fx, fy             : 362.26, 362.26
+  cx, cy             : 489.45, 320.04
+  depth_mode         : PERFORMANCE
+  self_calib         : disabled (Codex Q8 fix)
+  disto[12]          : 모두 0.0 (rectified output, raw 와 다름)
+```
+
+### Critical 발견
+
+1. **ZED X Mini disto = 12 elements 모두 0** — rectified output 의 calibration
+   - V4L2 raw path 시: `calibration_parameters_raw` 사용 필수 (raw 의 distortion 추출)
+   - 우리 P2-2 fix (length 5 → 4..12 허용) 가 정확
+   - quality_dataset_format.md 에 명시 필요
+
+2. **Frame size 1.5MB / frame** — 예상 200-500KB 보다 큼
+   - JPEG q=90 + depth raw float32 compress = 1MB+ per frame
+   - 60s × 12fps × every=5 ≈ 1GB (수용 가능 단 큰)
+   - 권장: `--every 10` (6fps recording, 60s = ~540MB) 또는 `--jpeg-quality 75`
+
+3. **Dump rate 29Hz** vs production 60Hz
+   - dump_quality_dataset = sync retrieve (production 외 entry)
+   - production pipeline 은 GPU async + γ interop → 60Hz
+   - quality dataset 의 use case = *long-running session* (60-120s) — 29Hz OK
+
+4. **Baseline 49.84mm** — ZED X Mini spec 정확
+   - SDK API: `stereo_transform.get_translation()[0]` 의 단위 *meters*. * 1000 = mm.
+   - 우리 `_extract_baseline_mm` 로직 OK
+
+### Conclusions
+
+1. **Week 0 ★ 완전 끝** — SHM v2 + Quality Dataset 모두 production-tested.
+2. **Plan D EKF input contract 완성** — 사용자 control repo 의 reader 작성 가능.
+3. **V4L2 baseline 의 prerequisite 준비** — `--include-right` + raw distortion 추출 필요 (다음 phase).
+4. **Mocap RMSE eval 의 prerequisite 준비** — `session_start_ns` (CLOCK_REALTIME) 로 mocap CSV align 가능.
+
+### Cumulative Week 0 progress
+
+```
+Commits (이번 세션 cumulative):
+  79a8a26 fix: ZED X Mini wide-FOV distortion model 12-element
+  d2bfb1d fix: Codex review b5kic9w4n — 2 P1 + 9 P2 Quality Dataset
+  39d8267 feat: Week 0 Day 2 ★ Quality Dataset I/O (Mac PASS)
+  c0d2ba3 docs: Week 0 Day 1 ★ 완료 — Jetson production v2 PASS
+  efbc036 fix: Codex review b1ky3965z — 8 P1 + 5 P2 SHM v2
+  56d21a5 feat: Week 0 Day 1 — SHM v2 Plan D input contract (Mac PASS)
+  2866f97 docs: ★ orchestration reset — SHM v2 spec + 6-week master plan
+
+Codex consults (총 ~4.1M tokens, 6회):
+  - bvfvkxo1m  orchestration big picture
+  - b1ky3965z  SHM v2 review (8 P1 + 7 P2)
+  - b5kic9w4n  Quality Dataset (2 P1 + 9 P2)
+  - + prior 3
+
+Master plan progress:
+  ✓ Week 0: SHM v2 + Quality Dataset (critical path 완료)
+  → Week 1: dataset 수집 + Plan D L1+L2 (병렬, 사용자 control repo)
+  → Week 2-3: V4L2 sparse (option) + Plan D L3
+  → Week 3-4: integration
+  → Week 4-5: stress + falsification
+  → Week 6: clinical dry-run + 환자
+
+진정 review cycle 적용:
+  Self-review (3-10 iter) → Codex outside → Fix → Mac PASS → Jetson PASS
+```
 
 ---
 
