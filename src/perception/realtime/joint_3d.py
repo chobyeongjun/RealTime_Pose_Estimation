@@ -90,6 +90,15 @@ class JointState3D:
     left_thigh_inclination:  Optional[float] = None
     right_thigh_inclination: Optional[float] = None
 
+    # ── Shank Inclination [deg] (Plan D spec 의 *6 joints 중 ankle proxy) ──
+    # knee→ankle 벡터의 수직(중력) 대비 기울기
+    # World frame 필요 (ZED IMU). 없으면 None.
+    # YOLO26s-lower6 은 *toe keypoint X — ankle dorsiflexion 직접 X.
+    # shank_inclination 가 *진정 *ankle 의 *진정 *kinematic proxy
+    # (gait analysis 의 *진정 *standard practice — Winter, Davis, etc.)
+    left_shank_inclination:  Optional[float] = None
+    right_shank_inclination: Optional[float] = None
+
     # ── Depth 품질 ──
     depth_valid_count: int = 0   # 유효 depth 가진 keypoint 수 (0~6)
     depth_quality: Dict[str, float] = field(default_factory=dict)  # {name: depth_m or nan}
@@ -218,11 +227,14 @@ def compute_joint_state(
     # ── Thigh Inclination (Hip Flexion 근사, world frame 필요) ──
     # hip→knee 벡터와 수직축(world_up_vec) 사잇각
     # 90° = 수평, 0° = 수직 아래 (swing 시 앞으로 기울어짐 = 양수 flexion)
+    # ── Shank Inclination (Ankle Flexion proxy, Plan D 6-joints spec) ──
+    # knee→ankle 벡터와 수직축 사잇각 — gait analysis 의 *진정 *standard
     if world_up_vec is not None:
         up = np.asarray(world_up_vec, dtype=np.float32)
         up_norm = float(np.linalg.norm(up))
         if up_norm > 1e-6:
             up = up / up_norm
+            # Thigh (hip → knee)
             for side, attr in [('left', 'left_thigh_inclination'),
                                 ('right', 'right_thigh_inclination')]:
                 h, k = f'{side}_hip', f'{side}_knee'
@@ -231,8 +243,19 @@ def compute_joint_state(
                     thigh_n = float(np.linalg.norm(thigh))
                     if thigh_n > 1e-6:
                         thigh = thigh / thigh_n
-                        # up과 thigh의 사잇각 → 수직 대비 기울기
                         cos_a = float(np.clip(np.dot(thigh, -up), -1.0, 1.0))
+                        inclination = float(np.degrees(np.arccos(cos_a)))
+                        setattr(state, attr, inclination)
+            # Shank (knee → ankle) — Plan D ankle proxy
+            for side, attr in [('left', 'left_shank_inclination'),
+                                ('right', 'right_shank_inclination')]:
+                k, a = f'{side}_knee', f'{side}_ankle'
+                if k in pos and a in pos:
+                    shank = pos[a] - pos[k]
+                    shank_n = float(np.linalg.norm(shank))
+                    if shank_n > 1e-6:
+                        shank = shank / shank_n
+                        cos_a = float(np.clip(np.dot(shank, -up), -1.0, 1.0))
                         inclination = float(np.degrees(np.arccos(cos_a)))
                         setattr(state, attr, inclination)
 

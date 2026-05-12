@@ -154,7 +154,10 @@ class Pipeline:
         self._t_prev_publish_mono_ns: int | None = None
 
         # Plan D Phase 2 predictor — production 통합 (--enable-plan-d 옵션)
-        # 진정 *4 joints: hip_L, knee_L, hip_R, knee_R (현재 production 의무)
+        # 진정 *6 joints (spec: hip_flex_L, knee_L, ankle_L, hip_R, knee_R, ankle_R)
+        # 진정 *q ordering = thigh_inc_L, knee_L, shank_inc_L, thigh_inc_R, knee_R, shank_inc_R
+        # 진정 *ankle proxy = shank_inclination (knee→ankle 의 *진정 *수직 대비)
+        # 진정 *YOLO26s-lower6 의 *6 keypoints (hip+knee+ankle L/R) — *진정 *6 joints 의무
         # 진정 *Plan D 의 *50ms lookahead 가 *진정 *effective latency game changer
         self._predictor: 'PlanDPredictor | None' = None
         self._plan_d_log_counter = 0
@@ -162,11 +165,11 @@ class Pipeline:
         if getattr(args, 'enable_plan_d', False) and _HAS_PLAN_D:
             try:
                 self._predictor = PlanDPredictor(
-                    n_joints=4,           # hip_L, knee_L, hip_R, knee_R
+                    n_joints=6,           # spec 의 *6 joints (hip+knee+ankle L/R)
                     fs_hz=67.0,           # production measured
                     initial_omega=6.28,   # 1 Hz stride (Codex IMPROVE: session calibration)
                 )
-                print(f"[Pipeline] Plan D predictor enabled (n_joints=4, fs=67Hz)")
+                print(f"[Pipeline] Plan D predictor enabled (n_joints=6, fs=67Hz)")
             except Exception as exc:
                 print(f"[Pipeline][WARN] Plan D init failed: {exc}", flush=True)
                 self._predictor = None
@@ -440,22 +443,50 @@ class Pipeline:
         _t4 = time.perf_counter()
 
         # ⑥.3 Plan D Phase 2 predictor — production 통합 (--enable-plan-d 시)
-        # 진정 *4 joints: hip_L, knee_L, hip_R, knee_R (rad)
+        # 진정 *6 joints (spec):
+        #   q[0] = left thigh inclination (hip flexion proxy, world frame 의무)
+        #   q[1] = left knee flexion (from flexion.left_knee_deg)
+        #   q[2] = left shank inclination (ankle proxy)
+        #   q[3] = right thigh inclination (hip flexion proxy)
+        #   q[4] = right knee flexion (from flexion.right_knee_deg)
+        #   q[5] = right shank inclination (ankle proxy)
+        # 진정 *world_up_vec 필요 — Method B 의 *진정 *ZED IMU world frame
+        # 진정 *thigh_inclination + shank_inclination 의 *진정 *state* 에 있음
         # 진정 *t_now = monotonic ns (Plan D 의 *진정 *time reference)
         # 진정 *forecast(τ) 의 *τ = T8 - T4 의 *진정 *제어 lookahead
-        if self._predictor is not None and flexion.valid and raw_3d:
+        if self._predictor is not None and state.valid and raw_3d:
             try:
                 import math as _math
-                q_rad = np.array([
-                    _math.radians(flexion.left_hip_deg),
-                    _math.radians(flexion.left_knee_deg),
-                    _math.radians(flexion.right_hip_deg),
-                    _math.radians(flexion.right_knee_deg),
-                ], dtype=np.float64)
-                # σ per joint — depth confidence + box_conf 기반 추정 (improve TODO)
-                # 진정 *진정 *1차: uniform 0.05 rad (~3°). 진정 *Phase B 에서
-                # *per-kp depth uncertainty 기반 동적 σ 의무.
-                sigma_per_joint = np.full(4, 0.05, dtype=np.float64)
+                # 진정 *6 joints — JointState3D 의 *진정 *inclinations 사용
+                # state.{left,right}_thigh_inclination, {left,right}_shank_inclination
+                # state.{left,right}_knee_flexion 가 *진정 *radian compute 의무
+                # 진정 *None 의무 fallback: 0.0 (단 *진정 *valid check 의무)
+                def _deg(val):
+                    return 0.0 if val is None else float(val)
+                q_deg = [
+                    _deg(state.left_thigh_inclination),
+                    _deg(state.left_knee_flexion),
+                    _deg(state.left_shank_inclination),
+                    _deg(state.right_thigh_inclination),
+                    _deg(state.right_knee_flexion),
+                    _deg(state.right_shank_inclination),
+                ]
+                # Check 모든 6 joints 의무 *진정 *valid (None 의무 X)
+                six_valid = (
+                    state.left_thigh_inclination is not None
+                    and state.left_knee_flexion is not None
+                    and state.left_shank_inclination is not None
+                    and state.right_thigh_inclination is not None
+                    and state.right_knee_flexion is not None
+                    and state.right_shank_inclination is not None
+                )
+                if not six_valid:
+                    raise RuntimeError("not all 6 joints valid")
+                q_rad = np.array([_math.radians(d) for d in q_deg], dtype=np.float64)
+                # σ per joint — depth confidence + box_conf 기반 (improve TODO Phase B)
+                # 진정 *진정 *1차: uniform 0.05 rad (~3°). 진정 *진정 *진정 *Phase B
+                # 의 *per-kp depth uncertainty 기반 동적 σ 의무.
+                sigma_per_joint = np.full(6, 0.05, dtype=np.float64)
                 # hip vertical (world frame)
                 l_hip = raw_3d.get('left_hip')
                 r_hip = raw_3d.get('right_hip')
