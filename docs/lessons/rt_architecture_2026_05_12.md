@@ -1,8 +1,23 @@
 # Real-Time Architecture — 진정 정시성 (RT determinism) 의 진정 의무
 
 **작성**: 2026-05-12. 사용자 명시: "정시성 맞춰서 데이터 처리해야 RT 가 될 거 아니야".
+**갱신**: 2026-05-12 (사용자 진정 정직 정확): "sensor 가 teensy 내로 들어가면 거기에서 teensy 내부에서 데이터를 받는 시간까지가 실제 sensor hz 아닌가?"
 **위치**: realtime-vision-control + 사용자 control repo (별도) + Teensy firmware (별도).
 **참조**: docs/lessons/shm_v2_packet_spec.md, plan_d_predictor_spec.md.
+
+## 0. 진정 *3 distinct RT metrics* (사용자 진정 정확 의 *진정 분리*)
+
+진정 — *prior view 의 *부분 잘못* (TRUE E2E = T9 - T0). 진정 정확 view:
+
+| Metric | Definition | 진정 의의 |
+|---|---|---|
+| **A. Sensor freshness at Teensy** | T8 - T0 | sensor data 의 *Teensy 도착* 시점 의 *진정 데이터 age* |
+| **B. Sensor Hz at Teensy** ★ | 1 / Δt8 (consecutive T8) | **진정 sensor Hz** = Teensy 의 *진정 입력 update rate* |
+| **C. Actuator response** | T9 - T8 | Teensy 내부 control loop period |
+
+진정 — *진정 vision Hz (73Hz) ≠ sensor Hz at Teensy*. *진정 sensor Hz = bottleneck of (vision, control, serial, Teensy inner)*.
+
+진정 — *진정 *control 의 *진정 의의* = **B (Sensor Hz at Teensy)** + **A (Sensor freshness)**. *T9 는 *Teensy 내부 시점* — *별도 metric*.
 
 ## 1. 진정 RT 의 의무 5 axes
 
@@ -14,25 +29,34 @@
 | **D. Determinism** | 같은 input → 같은 timing output | ⚠ predict p99 - p50 < 1ms 단 GC pause 의무 |
 | **E. Drop detection** | Silent drop X, 모든 drop 보고 | ⚠ SHM v2 seqlock 만, frame_id gap X |
 
-## 2. 진정 timing chain (T0 ~ T9)
+## 2. 진정 timing chain (T0 ~ T9) — 진정 *3 metric 분리 view*
 
 ```
-                                          timestamp source             measurement?
-T0  Sensor expose end (photons)           ZED IMAGE_TIMESTAMP          ✓ ZED API (CLOCK_REALTIME ns)
-T1  ZED ISP processing complete           (internal)                   △ ZED CURRENT - IMAGE = 14ms
-T2  grab() return                         time.perf_counter() ns       ✓ Python
-T3  retrieve_image+depth+np view          time.perf_counter() ns       ✓ Python
-T4  predict + depth_3d + SHM write done   SHM publish_done_mono_ns     ✓ SHM v2 field
-                                          ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-T5  C++ control loop SHM read             clock_gettime(MONOTONIC)     ⊗ instrumentation 의무
-T6  Impedance control compute done        clock_gettime(MONOTONIC)     ⊗ instrumentation 의무
-T7  Serial write to Teensy (syscall)      clock_gettime(MONOTONIC)     ⊗ instrumentation 의무
-                                          ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-T8  Teensy serial RX interrupt            micros()                     ⊗ firmware 의무
-T9  Actuator command applied              micros()                     ⊗ firmware 의무
-
-진정 TRUE E2E = T9 - T0 (cumulative chain)
+                                          timestamp source             metric A?  metric B?
+T0  Sensor expose end (photons)           ZED IMAGE_TIMESTAMP          ✓ start    -
+T1  ZED ISP processing complete           (internal)                   intermed   -
+T2  grab() return                         time.perf_counter() ns       intermed   -
+T3  retrieve_image+depth+np view          time.perf_counter() ns       intermed   -
+T4  predict + depth_3d + SHM write done   SHM publish_done_mono_ns     intermed   -
+                                          ┄┄┄┄ vision → control ┄┄┄┄
+T5  C++ control loop SHM read             clock_gettime(MONOTONIC)     intermed   -
+T6  Impedance control compute done        clock_gettime(MONOTONIC)     intermed   -
+T7  Serial write to Teensy (syscall)      clock_gettime(MONOTONIC)     intermed   -
+                                          ┄┄┄┄ control → Teensy ┄┄┄┄
+T8  Teensy Serial RX interrupt            micros() (host-synced)       ★ END A    ★ Hz B
+                                          ┄┄┄┄ Teensy internal ┄┄┄┄
+T9  Actuator command applied (AK60 CAN)   micros()                     -          metric C end
 ```
+
+진정 metric mapping:
+  **Metric A** (Sensor freshness at Teensy) = T8 - T0  ← *진정 RT 의 의의 *진정 critical*
+  **Metric B** (Sensor Hz at Teensy)         = 1 / Δt8 ← *진정 sensor 의 *Teensy 의 *입력 rate*
+  **Metric C** (Actuator response)           = T9 - T8  ← Teensy 내부
+
+진정 *진정 Plan D EKF 의 *진정 lookahead 의 *진정 의의*:
+  forecast(τ) 의 τ = expected_T8 - actual_publish_time
+                  = (current_T8_lag) + (control_compute) + (serial_lead)
+                  = Plan D 가 *진정 *예측* 의 *T8 시점* 의 *future joint angles*
 
 ## 3. 진정 time sync 의 의무 protocol
 
@@ -179,11 +203,26 @@ Plan D 의 진정 정확 timing:
 | Serial RX → command apply (T7→T9) | < 2ms |
 | Inner loop period jitter | < 100μs |
 
-### 진정 worst case TRUE E2E target
+### 진정 worst case TRUE E2E target (3 metrics 의 *진정 분리*)
 ```
-T0 → T9 p99 < 50ms (raw)
-+ Plan D EKF lookahead −50ms
-= effective control latency near 0 ★
+Metric A (Sensor freshness at Teensy, T8-T0):
+  p99 raw < 50ms              (sensor → Teensy 도착)
+  + Plan D EKF lookahead −50ms
+  = effective near 0 ★         (Teensy 가 *진정 *현재 시점 의 *예측 q* 의무)
+
+Metric B (Sensor Hz at Teensy):
+  Target ≥ 60 Hz (bottleneck = vision pipeline 의 67Hz, 진정 ≈ vision Hz)
+  진정 *Teensy 의 *진정 *입력 update rate
+
+Metric C (Teensy actuator response, T9-T8):
+  p99 < 2ms (Teensy 내부 control loop period)
+  111Hz inner loop 기준
+
+진정 — 사용자 *control 시점 의 *진정 의의*:
+  *Teensy 는 *T8 시점 의 *진정 sensor data 의 *받음*
+  → Plan D 의 *forecast(τ) 의 *진정 τ = T8 - T0 (sensor freshness at T8)*
+  → forecast.q_pred = T8 의 *진정 *predicted joint angles*
+  → Teensy 내부 control 의 *진정 *예측 q 사용 → actuator command (T9)
 ```
 
 ## 8. 진정 frame drop detection
