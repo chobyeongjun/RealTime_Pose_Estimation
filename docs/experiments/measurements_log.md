@@ -357,13 +357,64 @@ P2 일부 fix:
 - [x] Watchdog v2 호환 검증
 - [ ] (사용자) C++ control repo 의 SHM v2 reader skeleton
 
-### NEXT — Week 0 Day 2-3
+### NEXT — Week 0 Day 2-3 → **★ 완료 다음 commit**
 
-**dump_quality_dataset.py** implement (3-iteration plan 이미 작성, 다음 commit):
-- Recorded session 의 raw RGB/L/R + depth + pose + calib + timestamps + valid_mask 저장
-- JPEG RGB + PNG16 depth + sample `--every N` (~12fps recording, 60s = ~500MB)
-- ZED self-calibration disabled + `session_calib.json` 1회 저장
-- Quality gate / V4L2 baseline / Plan D EKF training data 의 prerequisite
+---
+
+## 2026-05-12 — Week 0 Day 2 ★ Quality Dataset I/O (10-iteration review, Mac PASS)
+
+### 10-iteration review topics (사용자 의지)
+
+| # | Topic | 결정 |
+|---|---|---|
+| 1 | Architecture (separate vs hook) | **separate entry** (production hot path 영향 X) |
+| 2 | Schema | SHM v2 fields 와 완전 동일 |
+| 3 | Disk format | JPEG q=90 RGB + raw depth float32 (np.savez_compressed) |
+| 4 | Disk space | real ZED ~200-500KB/frame, synthetic worst ~2MB |
+| 5 | ZED self-calib | `camera_disable_self_calib=True` + snapshot to session_calib.json |
+| 6 | Synchronization | rgb_ts + depth_ts + publish_done_mono — ZED grab 보장 |
+| 7 | Error handling | disk full check, SIGINT graceful, ValueError 의 missing field |
+| 8 | Plan D EKF compat | npz schema = SHM v2 → 사용자 control repo reader 동일 unpack |
+| 9 | V4L2 baseline | `--include-right` 시 right RGB JPEG archive |
+| 10 | Mocap sync | session_start_ns (CLOCK_REALTIME) → mocap CSV alignment |
+
+### 작성 file (6, ~1100 line)
+
+| File | Lines | Role |
+|---|---|---|
+| `quality_dataset_io.py` | ~330 | save/load/verify (Mac executable, no CUDA) |
+| `zed_calib_load.py` | ~190 | ZED snapshot (Jetson only) |
+| `dump_quality_dataset.py` | ~220 | main entry (Jetson, bridge + ZED) |
+| `tests/test_quality_dataset_io.py` | ~280 | pytest-based schema 검증 |
+| `scripts/verify_quality_dataset.py` | ~250 | single command 통합 verify |
+| `docs/lessons/quality_dataset_format.md` | ~190 | schema reference |
+
+### Mac verify (post-implement) PASS
+
+```
+[1] import quality_dataset_io      ✓ SCHEMA_VERSION=1
+[2] dataclass 18 fields            ✓ all present
+[3] synthetic round-trip           ✓ scalars + arrays + JPEG + depth
+[4] JPEG encode/decode             ✓ quality affects size, color preserved
+[5] depth NaN/inf/0 preservation   ✓ raw float32
+[6] verify_frame_schema            ✓ K mismatch raises
+[7] session_calib.json             ✓ round-trip + version check
+[8] disk space estimation          ✓ real ZED < 500KB, synthetic worst ~2MB
+
+=== ALL CHECKS PASSED ===
+```
+
+### Conclusions
+
+1. **Quality dataset I/O = SHM v2 와 schema 완전 일치** → live + offline 동일 unpack
+2. **Mac executable test infrastructure** — pyzed 없이 schema 검증 가능
+3. **Plan D EKF training data + V4L2 baseline + Mocap RMSE prerequisite 준비**
+
+### Action items
+- [x] Mac verify PASS
+- [ ] Jetson dump 실행 (60s session, ~150-500MB)
+- [ ] (사용자) C++ control repo 의 npz reader (또는 SHM v2 reader 와 같은 unpack)
+- [ ] 다음 phase: **pose computation 추가** (YOLO TRT batch on npz)
 
 ---
 
