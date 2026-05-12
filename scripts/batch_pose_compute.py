@@ -170,52 +170,152 @@ def _self_test() -> int:
 
 def _process_one_frame_jetson(
     npz_path: Path,
+    output_path: Path,
     runner: Any,
     pre: Any,
     post: Any,
     sm: Any,
     schema: Any,
     calib: dict,
-    overwrite: bool = True,
 ) -> Optional[dict]:
-    """Jetson — one frame 의 npz → pose update → atomic re-save.
+    """Jetson — one frame 의 npz → pose update → save to output_path.
+
+    Production pipeline 의 *single-frame mode*. Bridge 우회 — npz 의 RGB + depth 만 사용.
 
     Args:
-        npz_path: input frame_NNNNNN.npz
-        runner: TRTRunner (perception.CUDA_Stream.trt_runner)
+        npz_path: input frame_NNNNNN.npz (raw)
+        output_path: output frame_NNNNNN.npz (posed, raw 보존)
+        runner: TRTRunner
         pre: GpuPreprocessor
         post: GpuPostprocessor
         sm: StreamManager
         schema: KeypointSchema
-        calib: dict with fx, fy, cx, cy, baseline_mm
-        overwrite: True = in-place update, False = new file with _posed suffix
+        calib: dict (left_cam.fx, .fy, .cx, .cy, baseline_mm)
 
     Returns:
         Stats dict (box_conf, valid_mask_bits, n_valid_kp, infer_ms).
     """
     import torch
-    # 이 function 은 Jetson 의 perception.CUDA_Stream 의 *전체 pipeline* 사용.
-    # full implement = production pipeline 의 *single-frame mode*.
-    # 현재는 skeleton — Jetson 의 *batch* 진행 시 implement.
+    import time as _time
 
     frame = load_frame_npz(npz_path)
     H, W = frame.depth_m.shape
     K = schema.num_keypoints
 
-    # BGRA → BGR (drop alpha) → contiguous
-    bgr = frame.rgb_bgra[:, :, :3]   # B, G, R
-    # YOLO TRT 의 input = BGR or RGB (depends on engine). 우리 engine = BGR (Track B).
+    # BGRA → BGR (drop alpha)
+    bgr_np = frame.rgb_bgra[:, :, :3]   # (H, W, 3) uint8
 
-    # Preprocess + infer + post — production pipeline 동일
-    # 단 single-frame, batch=1.
-    # ★ TODO (Jetson): pre.preprocess(bgr_gpu) → infer → post(pose)
-    # 현재 skeleton — Jetson run time 에 actual implement.
+    # Upload to GPU
+    device = torch.device("cuda:0")
+    bgr_gpu = torch.from_numpy(bgr_np).to(device, non_blocking=False)   # (H, W, 3) uint8
+    depth_gpu = torch.from_numpy(frame.depth_m).to(device, non_blocking=False)   # (H, W) float32
 
-    LOGGER.warning(
-        "[skeleton] Jetson pose computation not yet wired. "
-        "Use production pipeline 의 single-frame mode 또는 직접 TRT API."
+    # GpuPreprocessor 의 API — production pipeline 동일 (BGRA / BGR 의 input)
+    # GpuPreprocessor.preprocess(bgra_gpu) — 단 우리 = bgr.
+    # 단순화: GpuPreprocessor 가 BGR 직접 받기 어려우면 BGRA 로 변환.
+    bgra_gpu = torch.cat([bgr_gpu, torch.full_like(bgr_gpu[..., :1], 255)], dim=-1)
+
+    # Preprocess (BGRA → letterbox 640×640 normalized)
+    with torch.cuda.stream(sm.streams["pre"].stream):
+        try:
+            pre_out, lb_params = pre.preprocess(bgra_gpu)
+        except Exception as e:
+            LOGGER.error("preprocess failed at %s: %s", npz_path.name, e)
+            return None
+
+    sm.streams["pre"].stream.synchronize()
+
+    # TRT inference
+    t0 = _time.perf_counter()
+    with torch.cuda.stream(sm.streams["infer"].stream):
+        try:
+            raw_output = runner.infer(pre_out, stream=sm.streams["infer"].stream)
+        except Exception as e:
+            LOGGER.error("infer failed at %s: %s", npz_path.name, e)
+            return None
+    sm.streams["infer"].stream.synchronize()
+    infer_ms = (_time.perf_counter() - t0) * 1e3
+
+    # Postprocess (un-letterbox + 3D lift)
+    calibration_dict = {
+        "fx": float(calib["left_cam"]["fx"]),
+        "fy": float(calib["left_cam"]["fy"]),
+        "cx": float(calib["left_cam"]["cx"]),
+        "cy": float(calib["left_cam"]["cy"]),
+        "R_world_from_cam": None,
+    }
+    with torch.cuda.stream(sm.streams["post"].stream):
+        try:
+            pose_result = post.post(
+                raw_output=raw_output,
+                lb_params=lb_params,
+                depth_hw=depth_gpu,
+                calibration=calibration_dict,
+                stream=sm.streams["post"].stream,
+                ts_s=frame.rgb_ts_ns / 1e9,
+                scalar_host=None,
+            )
+        except Exception as e:
+            LOGGER.error("post failed at %s: %s", npz_path.name, e)
+            return None
+    sm.streams["post"].stream.synchronize()
+
+    # PoseResult → numpy
+    kpts_3d_np = pose_result.kpts_3d_m.cpu().numpy().astype(np.float32)
+    kpts_2d_np = pose_result.kpts_2d_px.cpu().numpy().astype(np.float32)
+    kp_conf_np = pose_result.kpt_conf.cpu().numpy().astype(np.float32)
+
+    # Per-kp validity derive (production 동일 logic)
+    z_valid = np.isfinite(kpts_3d_np[:, 2]) & (kpts_3d_np[:, 2] > 0)
+    conf_valid = kp_conf_np >= KP_CONF_THRESHOLD
+    bit_valid = z_valid & conf_valid
+    valid_mask_bits = 0
+    for i in range(K):
+        if bit_valid[i]:
+            valid_mask_bits |= (1 << i)
+
+    is_valid_frame = (
+        valid_mask_bits != 0
+        and pose_result.box_conf >= 0.25   # detection threshold
     )
-    return None
+
+    # kp_sigma_m (현재 default uniform — production 의 진정 추정 의무, Codex P2-4)
+    kp_sigma_m = np.full((K, 3), 0.015, dtype=np.float32)
+    pose_cov_diag = (kp_sigma_m ** 2).astype(np.float32)
+
+    # Update QualityFrame + atomic save
+    updated = QualityFrame(
+        frame_id=frame.frame_id,
+        rgb_ts_ns=frame.rgb_ts_ns,
+        depth_ts_ns=frame.depth_ts_ns,
+        depth_age_us=frame.depth_age_us,
+        publish_done_mono_ns=time.monotonic_ns(),
+        valid_mask_bits=valid_mask_bits,
+        valid_reason=VALID_OK if is_valid_frame else INVALID_NO_DETECTION,
+        ts_domain=TS_DOMAIN_EPOCH,
+        valid=is_valid_frame,
+        world_frame_applied=False,
+        box_conf=float(pose_result.box_conf),
+        depth_invalid_ratio=frame.depth_invalid_ratio,
+        kpts_2d_px=kpts_2d_np,
+        kpts_3d_m=kpts_3d_np,
+        kp_conf=kp_conf_np,
+        kp_sigma_m=kp_sigma_m,
+        pose_cov_diag=pose_cov_diag,
+        rgb_bgra=frame.rgb_bgra,
+        depth_m=frame.depth_m,
+        rgb_right_bgra=frame.rgb_right_bgra,
+    )
+    save_frame_npz(output_path, updated)
+
+    return {
+        "frame_id": frame.frame_id,
+        "valid": is_valid_frame,
+        "valid_mask_bits": valid_mask_bits,
+        "n_valid_kp": int(bin(valid_mask_bits).count("1")),
+        "box_conf": float(pose_result.box_conf),
+        "infer_ms": infer_ms,
+    }
 
 
 def main() -> int:
@@ -306,19 +406,25 @@ def main() -> int:
     if args.limit > 0:
         npz_files = npz_files[:args.limit]
 
-    LOGGER.info("processing %d frames from %s", len(npz_files), args.input_dir)
-    LOGGER.info("calib: fx=%.2f, baseline=%.2fmm", calib["left_cam"]["fx"], calib["baseline_mm"])
+    LOGGER.info("processing %d frames from %s → %s",
+                len(npz_files), args.input_dir, output_dir)
+    LOGGER.info("calib: fx=%.2f, baseline=%.2fmm",
+                calib["left_cam"]["fx"], calib["baseline_mm"])
 
     t_start = time.time()
     processed = 0
     valid_count = 0
+    infer_ms_list = []
     for npz_path in npz_files:
+        output_path = output_dir / npz_path.name
         stats = _process_one_frame_jetson(
-            npz_path, runner, pre, post, sm, schema, calib,
-            overwrite=args.overwrite,
+            npz_path, output_path,
+            runner, pre, post, sm, schema, calib,
         )
-        if stats is not None and stats.get("valid", False):
-            valid_count += 1
+        if stats is not None:
+            if stats.get("valid", False):
+                valid_count += 1
+            infer_ms_list.append(stats.get("infer_ms", 0))
         processed += 1
         if processed % 50 == 0:
             elapsed = time.time() - t_start
@@ -326,9 +432,10 @@ def main() -> int:
                         processed, len(npz_files), elapsed)
 
     elapsed = time.time() - t_start
-    LOGGER.info("DONE: processed=%d valid=%d elapsed=%.1fs (%.1f fps)",
+    avg_infer = float(np.mean(infer_ms_list)) if infer_ms_list else 0.0
+    LOGGER.info("DONE: processed=%d valid=%d elapsed=%.1fs (%.1f fps, avg infer=%.2fms)",
                 processed, valid_count, elapsed,
-                processed / max(elapsed, 0.001))
+                processed / max(elapsed, 0.001), avg_infer)
     return 0
 
 
