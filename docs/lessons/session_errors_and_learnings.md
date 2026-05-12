@@ -186,9 +186,36 @@
 
 ---
 
-## 8. New Learning — V4L2 Bayer 발견 (2026-05-12)
+## 8.5 Jetson Integration Test Bugs (2026-05-12)
 
-### 8.1 ZED X (tegra-capture-vi) = Bayer RAW10 만 (NV12 X)
+### 8.5.1 run_all_jetson_tests.sh silent pass bug
+- **증상**: 7 PASS 표시 단 실제 2 fail (v4l2_capture, sparse_stereo).
+- **원인**: `eval "cmd | tail -5"` 의 exit code = tail (0). pipe 의 첫번째 command fail 무시.
+- **해결**: `bash -c "set -o pipefail; $cmd"` — sub-shell + pipefail 로 pipe 안의 *어느* command fail 도 전파.
+- **Lesson**: bash pipe 의 exit code = 마지막 command. `pipefail` 의무 사용. eval + pipe = 진정 fragile.
+
+### 8.5.2 V4L2 IOCTL ctypes struct alignment
+- **증상**: `V4L2 set format failed: requested 0x30314752 (BA10), got 0x000004b0 (1200)`.
+- **원인 1**: ctypes default alignment ≠ kernel packed. `_pack_ = 1` 미명시.
+- **원인 2**: V4L2Format 의 _padding 156 → 잘못. fmt union = 200 bytes total, v4l2_pix_format = 48 bytes → padding = 152 bytes.
+- **원인 3**: V4L2Buffer 의 m union = 8 bytes (kernel) 단 내 struct = 4 bytes (offset) — 4 byte misalignment. m_pad 추가 의무.
+- **해결**:
+  - `_pack_ = 1` 모든 V4L2Format, V4L2Buffer, V4L2RequestBuffers
+  - _padding 156 → 152
+  - V4L2Buffer 에 m_pad 4 bytes 추가 (m union 의 8 bytes 정확 cover)
+- **Lesson**: kernel ABI binding 시 *byte-perfect* 의무. ctypes 의 default = native alignment, kernel = packed. _pack_ = 1 + 정확 padding.
+
+### 8.5.3 numpy.float32 → torch.Tensor assign type strict
+- **증상**: `TypeError: can't assign a numpy.float32 to a torch.FloatTensor`.
+- **원인**: `disparity[i] = d_subpixel` 의 `d_subpixel` 가 numpy.float32 (cost_arr[best_idx]). torch.Tensor 에 numpy scalar 직접 assign 거부.
+- **해결**: `float(d_subpixel)` 또는 `torch.tensor(d_subpixel)` cast.
+- **Lesson**: numpy ↔ torch interop 시 *type strict*. Python float cast 가 가장 안전.
+
+---
+
+## 9. New Learning — V4L2 Bayer 발견 (2026-05-12)
+
+### 9.1 ZED X (tegra-capture-vi) = Bayer RAW10 만 (NV12 X)
 - **증상**: `v4l2-ctl --list-formats-ext /dev/video0` → 'BA10' (10-bit Bayer GRGR/BGBG) 만 노출.
 - **원인**: ZED X Mini 의 sensor 가 Bayer raw. tegra-capture-vi (Jetson V4L2) 가 raw 전달.
   NV12 path = Argus/ISP 거쳐야. *bare V4L2* 에선 raw bayer 만.

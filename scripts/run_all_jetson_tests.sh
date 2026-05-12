@@ -47,8 +47,10 @@ run_test() {
     echo "============================================================"
     echo "  ▶ $name"
     echo "============================================================"
-    eval "$cmd"
-    local rc=${PIPESTATUS[0]:-$?}
+    # ★ Fix: pipefail + sub-shell — pipe 안의 *어느* command fail 시 *전체 fail*.
+    # 기존 eval "cmd | tail -5" 의 exit code 가 tail (0) 만 보임 → silent pass bug.
+    bash -c "set -o pipefail; $cmd"
+    local rc=$?
     RESULTS_NAMES+=("$name")
     if [ "$rc" -eq 0 ]; then
         RESULTS_STATUS+=("PASS")

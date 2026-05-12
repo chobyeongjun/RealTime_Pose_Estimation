@@ -152,7 +152,9 @@ def sparse_stereo_disparity_pytorch(
         conf = (1.0 - cost_normalized) * (1.0 - ratio)
         conf = max(0.0, min(1.0, conf))
 
-        disparity[i] = d_subpixel
+        # ★ Codex Jetson 2026-05-12 fix: numpy.float32 → torch tensor 직접 assign fail.
+        # Python float 으로 cast 후 assign (torch 가 자동 wrap).
+        disparity[i] = float(d_subpixel)
         confidence[i] = float(conf)
 
     return disparity, confidence

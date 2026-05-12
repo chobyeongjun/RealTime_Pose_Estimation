@@ -73,9 +73,21 @@ def _IOWR(t, nr, size):
 # ─── V4L2 struct (linux/videodev2.h) ─────────────────────────────────────
 
 class V4L2Format(ctypes.Structure):
-    """struct v4l2_format with v4l2_pix_format union member."""
+    """struct v4l2_format with v4l2_pix_format union member.
+
+    ★ Codex Jetson 2026-05-12 발견: ctypes default alignment ≠ kernel packed.
+    _pack_ = 1 명시 + _padding 정확 사이즈 (200 - 48 = 152, 이전 156 = wrong).
+
+    Layout (linux/videodev2.h):
+        struct v4l2_format {
+            __u32 type;             // 4 bytes
+            union { ... } fmt;      // 200 bytes max (v4l2_pix_format = 48 + padding 152)
+        };
+    """
+    _pack_ = 1
     _fields_ = [
         ("type", ctypes.c_uint32),
+        # fmt.pix (v4l2_pix_format) — 48 bytes
         ("width", ctypes.c_uint32),
         ("height", ctypes.c_uint32),
         ("pixelformat", ctypes.c_uint32),
@@ -88,11 +100,13 @@ class V4L2Format(ctypes.Structure):
         ("ycbcr_enc", ctypes.c_uint32),
         ("quantization", ctypes.c_uint32),
         ("xfer_func", ctypes.c_uint32),
-        ("_padding", ctypes.c_uint8 * 156),    # union 의 reserved space
+        # fmt union 의 나머지 padding (200 - 48 = 152)
+        ("_padding", ctypes.c_uint8 * 152),
     ]
 
 
 class V4L2RequestBuffers(ctypes.Structure):
+    _pack_ = 1
     _fields_ = [
         ("count", ctypes.c_uint32),
         ("type", ctypes.c_uint32),
@@ -104,13 +118,20 @@ class V4L2RequestBuffers(ctypes.Structure):
 
 
 class V4L2Buffer(ctypes.Structure):
+    """struct v4l2_buffer.
+
+    ★ Codex Jetson 2026-05-12 발견: m union = 8 bytes (pointer 또는 offset+padding).
+    _pack_ = 1 + m_offset/m_pad 의무.
+    """
     class Timestamp(ctypes.Structure):
+        _pack_ = 1
         _fields_ = [
             ("tv_sec", ctypes.c_long),
             ("tv_usec", ctypes.c_long),
         ]
 
     class Timecode(ctypes.Structure):
+        _pack_ = 1
         _fields_ = [
             ("type", ctypes.c_uint32),
             ("flags", ctypes.c_uint32),
@@ -121,20 +142,25 @@ class V4L2Buffer(ctypes.Structure):
             ("userbits", ctypes.c_uint8 * 4),
         ]
 
+    _pack_ = 1
     _fields_ = [
-        ("index", ctypes.c_uint32),
+        ("index", ctypes.c_uint32),         # offset 0
         ("type", ctypes.c_uint32),
         ("bytesused", ctypes.c_uint32),
         ("flags", ctypes.c_uint32),
-        ("field", ctypes.c_uint32),
-        ("timestamp", Timestamp),
-        ("timecode", Timecode),
-        ("sequence", ctypes.c_uint32),
-        ("memory", ctypes.c_uint32),
-        ("offset", ctypes.c_uint32),
-        ("length", ctypes.c_uint32),
+        ("field", ctypes.c_uint32),         # offset 16
+        ("timestamp", Timestamp),            # 16 bytes (offset 20-36, 64-bit timeval)
+        ("timecode", Timecode),              # 16 bytes (offset 36-52)
+        ("sequence", ctypes.c_uint32),       # offset 52
+        ("memory", ctypes.c_uint32),         # offset 56
+        ("_pre_m_pad", ctypes.c_uint32),    # ★ 8-byte alignment of m union (60-64)
+        # m union — 8 bytes (offset uint32 OR userptr uint64 OR planes pointer)
+        ("offset", ctypes.c_uint32),         # offset 64 (m.offset OR m.userptr low)
+        ("m_pad", ctypes.c_uint32),          # offset 68 (m.userptr high if pointer)
+        ("length", ctypes.c_uint32),         # offset 72
         ("reserved2", ctypes.c_uint32),
-        ("request_fd", ctypes.c_int32),
+        ("request_fd", ctypes.c_int32),      # v4l2 Linux >= 4.20 추가
+        ("_tail_pad", ctypes.c_uint32),     # ★ struct 8-byte alignment (84-88)
     ]
 
 
