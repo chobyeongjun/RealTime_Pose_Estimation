@@ -64,13 +64,18 @@ echo ""
 
 # ─── Phase 3: Production 60s + trace logging (user mode!) ───────────────
 echo "── Phase 3: Production 60s + RT trace logging (user mode) ──"
-TRACE_CSV=/tmp/production_trace_$(date +%H%M%S).csv
+TS=$(date +%H%M%S)
+TRACE_CSV=/tmp/production_trace_${TS}.csv
+PROD_LOG=/tmp/production_full_${TS}.log
+
+# Clean prior root-owned files (sudo run 의 *진정 *leftover*)
+sudo rm -f /tmp/production_full.log /tmp/production_full_*.log 2>/dev/null || true
 
 PYTHONPATH=src:src/perception/benchmarks timeout 60 \
     python3 src/perception/realtime/pipeline_main.py \
     --method B --no-display \
     --trace-csv "$TRACE_CSV" \
-    2>&1 | tee /tmp/production_full.log | tail -30
+    2>&1 | tee "$PROD_LOG" | tail -30
 
 echo ""
 echo "  Trace CSV: $TRACE_CSV"

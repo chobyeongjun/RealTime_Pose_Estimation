@@ -28,6 +28,11 @@ def load_trace(csv_path: str) -> dict:
         rows = list(reader)
     if not rows:
         raise ValueError(f"empty trace: {csv_path}")
+    def _opt_float(key):
+        if key in rows[0]:
+            return np.array([float(r[key]) for r in rows], dtype=np.float64)
+        return None
+
     return {
         'frame_id': np.array([int(r['frame_id']) for r in rows], dtype=np.int64),
         't0_mono_ns': np.array([int(r['t0_mono_ns']) for r in rows], dtype=np.int64),
@@ -39,6 +44,10 @@ def load_trace(csv_path: str) -> dict:
         ),
         'interval_ms': np.array([float(r['interval_ms']) for r in rows], dtype=np.float64),
         'valid': np.array([int(r['valid']) for r in rows], dtype=np.int8),
+        # Path B: predict stage profile (optional, added 2026-05-12)
+        'predict_preprocess_ms': _opt_float('predict_preprocess_ms'),
+        'predict_infer_ms': _opt_float('predict_infer_ms'),
+        'predict_postprocess_ms': _opt_float('predict_postprocess_ms'),
     }
 
 
@@ -176,6 +185,33 @@ def main() -> int:
     n_valid = int(np.sum(data['valid']))
     print(f"  Valid frames: {n_valid} / {n_total} ({100*n_valid/n_total:.1f}%)")
     print()
+
+    # Path B: predict() per-stage profile (if available)
+    if data['predict_preprocess_ms'] is not None:
+        pp_pre = data['predict_preprocess_ms'][sl]
+        pp_inf = data['predict_infer_ms'][sl]
+        pp_post = data['predict_postprocess_ms'][sl]
+        # Filter zero-rows (production frames without profile)
+        nonzero = pp_pre > 0
+        if nonzero.any():
+            pp_pre = pp_pre[nonzero]
+            pp_inf = pp_inf[nonzero]
+            pp_post = pp_post[nonzero]
+            print("=" * 80)
+            print("  Path B: predict() per-stage profile (Python overhead 분해)")
+            print("=" * 80)
+            print(percentiles(pp_pre,  "  preprocess (numpy→GPU+norm)"))
+            print(percentiles(pp_inf,  "  TRT infer (execute+sync)"))
+            print(percentiles(pp_post, "  postprocess (parse+scale)"))
+            print(f"  {'-'*32}")
+            print(percentiles(pp_pre + pp_inf + pp_post, "  predict sum (sanity check)"))
+            print()
+            print(f"  진정 *trtexec engine floor: 8.48ms")
+            print(f"  진정 *현재 TRT infer:        {pp_inf.mean():.2f}ms "
+                  f"(overhead = {pp_inf.mean() - 8.48:+.2f}ms)")
+            print(f"  진정 *preprocess:            {pp_pre.mean():.2f}ms")
+            print(f"  진정 *postprocess:           {pp_post.mean():.2f}ms")
+            print()
 
     # Python overhead estimate (vs trtexec)
     TRTEXEC_FLOOR_MS = 8.48   # from trtexec measurement (commit 5165576)

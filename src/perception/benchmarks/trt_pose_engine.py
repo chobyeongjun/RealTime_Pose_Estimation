@@ -201,20 +201,50 @@ class TRTPoseEngine:
 
     # ── 추론 ─────────────────────────────────────────────────────────────────
 
-    def predict(self, image, is_bgra=False):
+    def predict(self, image, is_bgra=False, _profile=None):
+        """Run inference.
+
+        Args:
+            image: HxWxC numpy (BGR or BGRA per is_bgra).
+            is_bgra: input is BGRA (skips conversion).
+            _profile: optional dict — populated with per-stage ms:
+                'preprocess_ms', 'infer_ms', 'postprocess_ms'.
+                ⚠ Enables torch.cuda.synchronize() between stages — may
+                  add jitter. Use ONLY for diagnostic, not production hot path.
+        """
+        import time
         h, w = image.shape[:2]
+
+        if _profile is not None:
+            t0 = time.perf_counter()
+
         scale, pad_w, pad_h = self._preprocess_gpu(image, is_bgra=is_bgra)
+
+        if _profile is not None:
+            torch.cuda.synchronize()   # wait preprocess GPU ops
+            t1 = time.perf_counter()
+            _profile['preprocess_ms'] = (t1 - t0) * 1000.0
 
         # TRT 실행 (사전 바인딩 버퍼)
         with torch.cuda.stream(self._stream):
             self._context.execute_async_v3(self._stream.cuda_stream)
             self._stream.synchronize()
 
-        # GPU output 파싱 (최적화 #1: 18개만 CPU 복사)
-        return self._postprocess_gpu(scale, pad_w, pad_h, h, w)
+        if _profile is not None:
+            t2 = time.perf_counter()
+            _profile['infer_ms'] = (t2 - t1) * 1000.0
 
-    def predict_bgra(self, bgra_image):
-        return self.predict(bgra_image, is_bgra=True)
+        # GPU output 파싱 (최적화 #1: 18개만 CPU 복사)
+        result = self._postprocess_gpu(scale, pad_w, pad_h, h, w)
+
+        if _profile is not None:
+            t3 = time.perf_counter()
+            _profile['postprocess_ms'] = (t3 - t2) * 1000.0
+
+        return result
+
+    def predict_bgra(self, bgra_image, _profile=None):
+        return self.predict(bgra_image, is_bgra=True, _profile=_profile)
 
     # ── 후처리 (GPU 파싱) ────────────────────────────────────────────────────
 

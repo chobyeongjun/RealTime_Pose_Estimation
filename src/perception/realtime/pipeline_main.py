@@ -254,6 +254,11 @@ class Pipeline:
                 't4_publish_done_mono_ns',  # after SHM write
                 'interval_ms',         # publish-to-publish interval
                 'valid',
+                # Path B (Codex 2026-05-12): predict() per-stage profile
+                # ⚠ torch.cuda.synchronize() 사용 — production 영향 가능
+                'predict_preprocess_ms',
+                'predict_infer_ms',
+                'predict_postprocess_ms',
             ])
             print(f"[Pipeline] RT trace CSV → {self.args.trace_csv}")
         # 초기화 후, 루프 직전에 latency 방어 적용
@@ -296,14 +301,17 @@ class Pipeline:
         _t1 = time.perf_counter()
 
         # ② 추론 (capture 스레드가 depth retrieve — GPU 경합 허용)
+        # Path B: trace mode 시 predict 의 *진정 *3 stages 의 *진정 *분해 측정
+        predict_profile = {} if self._trace_writer is not None else None
         is_bgra = (rgb.ndim == 3 and rgb.shape[2] == 4)
         if is_bgra and hasattr(self.model, 'predict_bgra'):
-            result = self.model.predict_bgra(rgb)
+            result = self.model.predict_bgra(rgb, _profile=predict_profile)
         elif is_bgra:
             import cv2
-            result = self.model.predict(cv2.cvtColor(rgb, cv2.COLOR_BGRA2BGR))
+            result = self.model.predict(cv2.cvtColor(rgb, cv2.COLOR_BGRA2BGR),
+                                         _profile=predict_profile)
         else:
-            result = self.model.predict(rgb)
+            result = self.model.predict(rgb, _profile=predict_profile)
         _t2 = time.perf_counter()
 
         # ③ depth 회수 (predict와 병렬 retrieve됨, 대부분 0ms 대기) → 3D
@@ -411,6 +419,8 @@ class Pipeline:
                 if self._t_prev_publish_mono_ns is not None else 0.0
             )
             self._t_prev_publish_mono_ns = t4_publish_done_mono_ns
+            # Per-stage predict profile (Path B 의무 — Python overhead 분해)
+            pp = predict_profile or {}
             self._trace_writer.writerow([
                 self._frame_id,
                 int(t0 * 1e9),         # T0 (frame start, perf_counter ns)
@@ -420,6 +430,9 @@ class Pipeline:
                 t4_publish_done_mono_ns,  # T4 (after SHM write, MONOTONIC ns)
                 f"{interval_ms:.3f}",
                 int(flexion.valid),
+                f"{pp.get('preprocess_ms', 0.0):.3f}",
+                f"{pp.get('infer_ms', 0.0):.3f}",
+                f"{pp.get('postprocess_ms', 0.0):.3f}",
             ])
             self._frame_id += 1
 
