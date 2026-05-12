@@ -262,6 +262,59 @@ def compute_joint_state(
     return state
 
 
+def compute_kp_sigma(
+    positions: Dict[str, np.ndarray],
+    confs: Dict[str, float],
+    fx: float = 480.0,
+    fy: Optional[float] = None,
+    baseline_m: float = 0.063,
+    sigma_d_subpixel: float = 0.25,
+    default_sigma_m: float = 0.015,
+) -> Dict[str, np.ndarray]:
+    """Per-keypoint 3D position uncertainty σ (m) — Plan D EKF R source.
+
+    진정 *stereo depth uncertainty formula (Plan D spec)*:
+      σ_z = Z² × σ_d / (fx × baseline)        Z = depth, σ_d = stereo subpixel σ
+      σ_x ≈ Z / fx                             (pixel quantization at depth Z)
+      σ_y ≈ Z / fy
+
+    Confidence weighting: low conf → larger σ (weight = 1 / max(0.1, conf)).
+
+    Args:
+        positions: dict {joint_name: (X, Y, Z)} world frame m
+        confs: dict {joint_name: 0-1}
+        fx, fy: focal length px (ZED X Mini SVGA ~ 480px)
+        baseline_m: stereo baseline (ZED X Mini ~ 0.063m)
+        sigma_d_subpixel: stereo matching subpixel σ (default 0.25 — paper)
+        default_sigma_m: fallback σ when depth invalid (default 15mm)
+
+    Returns:
+        dict {joint_name: np.array([σ_x, σ_y, σ_z]) float32 m}
+        Invalid joints → large σ (1.0m) for safe EKF R inflation.
+    """
+    if fy is None:
+        fy = fx
+    sigmas: Dict[str, np.ndarray] = {}
+    for name, pos in positions.items():
+        Z = float(pos[2]) if len(pos) >= 3 else float('nan')
+        if not np.isfinite(Z) or Z <= 0:
+            sigmas[name] = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+            continue
+        # Stereo depth σ
+        sigma_z = (Z * Z) * sigma_d_subpixel / (fx * baseline_m)
+        # Pixel quantization at Z
+        sigma_x = Z / fx
+        sigma_y = Z / fy
+        # Confidence weighting
+        c = float(confs.get(name, 0.5))
+        weight = 1.0 / max(0.1, c)
+        sigmas[name] = np.array(
+            [sigma_x * weight, sigma_y * weight, sigma_z * weight],
+            dtype=np.float32,
+        )
+    return sigmas
+
+
 def validate_bone_lengths(state: JointState3D) -> Dict[str, bool]:
     """
     뼈 길이가 해부학적 범위 내인지 확인.

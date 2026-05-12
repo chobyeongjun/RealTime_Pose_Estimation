@@ -94,6 +94,38 @@ except ImportError as _e:
     PlanDPredictor = None
     print(f"[Pipeline][WARN] Plan D predictor import failed: {_e}", flush=True)
 
+# SHM v2 publisher (Plan D input contract, Codex review b1ky3965z PASSED)
+# 진정 *Track B 의 *진정 *기존 작성 활용 — namespace 만 'hwalker_pose_v2' 의무
+try:
+    from perception.CUDA_Stream.shm_publisher import (
+        ShmPublisher as ShmPublisherV2,
+        VALID_OK as SHM_V2_VALID_OK,
+    )  # type: ignore
+    _HAS_SHM_V2 = True
+except ImportError as _e:
+    _HAS_SHM_V2 = False
+    ShmPublisherV2 = None
+    SHM_V2_VALID_OK = 0
+    print(f"[Pipeline][WARN] SHM v2 publisher import failed: {_e}", flush=True)
+
+# Per-kp σ helper (Plan D R matrix source)
+try:
+    from joint_3d import compute_kp_sigma   # noqa: F401  # type: ignore
+except ImportError:
+    # production import via realtime/ folder
+    try:
+        from src.perception.realtime.joint_3d import compute_kp_sigma  # type: ignore
+    except ImportError:
+        compute_kp_sigma = None  # graceful fallback (uniform σ)
+
+# 6 keypoints ordering (Plan D spec, plan_d_predictor_spec.md):
+#   q[0] = left_hip,   q[1] = left_knee,  q[2] = left_ankle,
+#   q[3] = right_hip,  q[4] = right_knee, q[5] = right_ankle
+KEYPOINT_ORDER_6 = (
+    'left_hip', 'left_knee', 'left_ankle',
+    'right_hip', 'right_knee', 'right_ankle',
+)
+
 # ─── 상수 ─────────────────────────────────────────────────────────────────────
 TARGET_HZ       = 60.0
 TARGET_DT       = 1.0 / TARGET_HZ          # 0.0167 s
@@ -116,6 +148,11 @@ class Pipeline:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args   = args
         self.pub    = ShmPublisher(SHM_NAME)
+        # SHM v2 publisher (--enable-shm-v2 옵션, 6 keypoints, Plan D contract)
+        self.pub_v2: 'ShmPublisherV2 | None' = None
+        self._camera_fx: float = 480.0   # ZED X Mini SVGA default — overridden in _init_camera
+        self._camera_fy: float = 480.0
+        self._camera_baseline_m: float = 0.063   # ZED X Mini baseline
         self.kf     = GaitKalmanFilter(dt=TARGET_DT, angle_noise_deg=2.5,
                                        accel_noise_deg_s2=1000.0)
         self.guard      = DepthSafetyGuard()
@@ -209,6 +246,29 @@ class Pipeline:
         self.camera.open()
         print("[Pipeline] 카메라 열기 완료 (PipelinedCamera)")
 
+        # ZED intrinsics capture — SHM v2 per-kp σ + Plan D R matrix source
+        try:
+            info = self._raw_camera.zed.get_camera_information()
+            calib = info.camera_configuration.calibration_parameters
+            self._camera_fx = float(calib.left_cam.fx)
+            self._camera_fy = float(calib.left_cam.fy)
+            # baseline from stereo translation (T_x)
+            try:
+                T = calib.stereo_transform.get_translation().get()
+                self._camera_baseline_m = float(abs(T[0])) * 1e-3  # ZED returns mm
+                if self._camera_baseline_m < 0.001:
+                    self._camera_baseline_m = 0.063  # fallback ZED X Mini
+            except Exception:
+                self._camera_baseline_m = 0.063
+            print(
+                f"[Pipeline] Camera intrinsics: fx={self._camera_fx:.1f} "
+                f"fy={self._camera_fy:.1f} baseline={self._camera_baseline_m*1000:.1f}mm"
+            )
+        except Exception as exc:
+            print(f"[Pipeline][WARN] camera intrinsics capture failed: {exc} "
+                  f"(fallback fx={self._camera_fx} fy={self._camera_fy} "
+                  f"baseline={self._camera_baseline_m*1000:.1f}mm)", flush=True)
+
     @property
     def _inner_camera(self):
         """intrinsics 등 접근용 원본 카메라"""
@@ -269,7 +329,19 @@ class Pipeline:
         self._init_model()
         self._init_calibrator()
         self.pub.open()
-        print("[Pipeline] SHM 오픈 완료 →", SHM_NAME)
+        print("[Pipeline] SHM v1 오픈 완료 →", SHM_NAME)
+        # SHM v2 publisher (Plan D input contract, 6 keypoints)
+        if getattr(self.args, 'enable_shm_v2', False) and _HAS_SHM_V2:
+            try:
+                self.pub_v2 = ShmPublisherV2(
+                    num_keypoints=6,
+                    name='hwalker_pose_v2',
+                    create=True,
+                )
+                print("[Pipeline] SHM v2 오픈 완료 → /hwalker_pose_v2 (K=6)")
+            except Exception as exc:
+                print(f"[Pipeline][WARN] SHM v2 init failed: {exc}", flush=True)
+                self.pub_v2 = None
         # RT trace CSV open (--trace-csv 옵션 시)
         if getattr(self.args, 'trace_csv', None):
             import csv
@@ -441,6 +513,67 @@ class Pipeline:
             method         = method,
         ))
         _t4 = time.perf_counter()
+
+        # ⑥.2 SHM v2 publish — Plan D input contract (6 keypoints + per-kp σ)
+        # 진정 *publish_done_mono_ns = T4 (after SHM write). rgb_ts_ns = T0 (frame start).
+        # 진정 *6 keypoint ordering: KEYPOINT_ORDER_6 (Plan D spec)
+        if self.pub_v2 is not None and state.valid:
+            try:
+                kpts_3d_v2 = np.zeros((6, 3), dtype=np.float32)
+                kpts_2d_v2 = np.zeros((6, 2), dtype=np.float32)
+                kpt_conf_v2 = np.zeros(6, dtype=np.float32)
+                for i, name in enumerate(KEYPOINT_ORDER_6):
+                    if name in state.positions:
+                        kpts_3d_v2[i] = state.positions[name]
+                    if name in state.pixels:
+                        kpts_2d_v2[i] = state.pixels[name]
+                    kpt_conf_v2[i] = float(state.confs.get(name, 0.0))
+
+                # Per-kp σ derivation (depth uncertainty + confidence)
+                if compute_kp_sigma is not None:
+                    sigmas_dict = compute_kp_sigma(
+                        state.positions, state.confs,
+                        fx=self._camera_fx, fy=self._camera_fy,
+                        baseline_m=self._camera_baseline_m,
+                    )
+                    kp_sigma_m_v2 = np.zeros((6, 3), dtype=np.float32)
+                    for i, name in enumerate(KEYPOINT_ORDER_6):
+                        if name in sigmas_dict:
+                            kp_sigma_m_v2[i] = sigmas_dict[name]
+                        else:
+                            kp_sigma_m_v2[i] = np.array(
+                                [0.015, 0.015, 0.015], dtype=np.float32
+                            )
+                else:
+                    kp_sigma_m_v2 = None
+
+                # rgb_ts_ns = T0 (frame start, CLOCK_MONOTONIC ns)
+                # 진정 *주의*: SHM v2 spec 의 *진정 *원래 CLOCK_REALTIME ns 단
+                # 현재 production 의 *진정 *CLOCK_MONOTONIC ns 사용 (Plan D
+                # consistent reference). control side 의 *진정 *동일 ref 의무.
+                rgb_ts_ns = int(t0 * 1e9)
+
+                self.pub_v2.publish(
+                    frame_id=self._frame_id,
+                    rgb_ts_ns=rgb_ts_ns,
+                    kpts_3d_m=kpts_3d_v2,
+                    kpt_conf=kpt_conf_v2,
+                    kpts_2d_px=kpts_2d_v2,
+                    box_conf=float(getattr(result, 'box_conf', 0.0)),
+                    valid=bool(state.valid),
+                    depth_invalid_ratio=0.0,
+                    world_frame_applied=(method == 'B'),
+                    valid_reason=SHM_V2_VALID_OK,
+                    depth_ts_ns=None,    # same frame as rgb (1-frame-late path X 현재)
+                    valid_mask_bits=None,   # auto-derive from kpt_conf + depth
+                    kp_sigma_m=kp_sigma_m_v2,
+                    pose_cov_diag=None,  # default = kp_sigma_m²
+                )
+            except Exception as _exc:
+                # production 의무 graceful — SHM v1 publish 그대로 진행
+                if self._frame_id < 5:  # 첫 5 frame 의무 진단
+                    print(f"[Pipeline][WARN] SHM v2 publish failed: {_exc}",
+                          flush=True)
 
         # ⑥.3 Plan D Phase 2 predictor — production 통합 (--enable-plan-d 시)
         # 진정 *6 joints (spec):
@@ -856,6 +989,14 @@ class Pipeline:
         self.pub.close()
         self.pub.unlink()
 
+        # SHM v2 publisher close
+        if self.pub_v2 is not None:
+            try:
+                self.pub_v2.close()
+                print("[Pipeline] SHM v2 close 완료")
+            except Exception as exc:
+                print(f"[Pipeline][WARN] SHM v2 close failed: {exc}", file=sys.stderr)
+
         # RT trace CSV close (--trace-csv 활성화 시)
         if self._trace_fp is not None:
             try:
@@ -961,9 +1102,15 @@ def parse_args() -> argparse.Namespace:
         "--enable-plan-d", dest="enable_plan_d", action="store_true",
         help="Plan D Phase 2 predictor 활성 (PlanDPredictor, 218 tests Mac PASS).\n"
              "  매 frame 의무 feed(t_now, q, σ, hip_z). 매 200 frames 의무\n"
-             "  console log of stride_count + level + omega + HS prediction.\n"
-             "  ⚠ 진정 *Phase B (별도 commit) — SHM v2 publish 후 *진정 *forecast\n"
-             "    publish 의 *진정 *진정 *외부 mechanism 의무 추가.",
+             "  console log of stride_count + level + omega + HS prediction.",
+    )
+    parser.add_argument(
+        "--enable-shm-v2", dest="enable_shm_v2", action="store_true",
+        help="SHM v2 publisher 활성 (Plan D input contract, 6 keypoints).\n"
+             "  /hwalker_pose_v2 namespace (SHM v1 /hwalker_pose 그대로 유지).\n"
+             "  fields: rgb_ts_ns, depth_ts_ns, publish_done_mono_ns, frame_id,\n"
+             "          kpts_3d_m, kpt_conf, kpts_2d_px, kp_sigma_m, valid_mask_bits.\n"
+             "  control repo C++ reader 의무 (cpp_shm_v2_reader_skeleton.md spec).",
     )
     return parser.parse_args()
 
