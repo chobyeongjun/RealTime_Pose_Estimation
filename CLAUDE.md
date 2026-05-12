@@ -104,10 +104,11 @@ python3 -m perception.CUDA_Stream.view_sagittal
 ```bash
 git lfs pull   # *.pt, *.onnx
 # *.engine은 Jetson에서 trtexec로 빌드 (15~20분)
+# ⚠️ TRT 10.3+ syntax: --workspace=4096 deprecated → --memPoolSize=workspace:4096
 /usr/src/tensorrt/bin/trtexec \
     --onnx=src/perception/models/yolo26s-lower6-v2.onnx \
     --saveEngine=src/perception/CUDA_Stream/yolo26s-lower6-v2.engine \
-    --fp16 --workspace=4096
+    --fp16 --memPoolSize=workspace:4096
 ```
 
 ## 첫 세션 시작 시 확인 (다음 세션 누구든)
