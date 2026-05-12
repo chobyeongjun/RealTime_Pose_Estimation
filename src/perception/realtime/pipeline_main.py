@@ -137,6 +137,12 @@ class Pipeline:
         self._vel_hit_counter = 0
         self._vel_total_counter = 0
 
+        # RT analysis — per-frame trace logging (--trace-csv 옵션)
+        self._frame_id = 0
+        self._trace_fp = None
+        self._trace_writer = None
+        self._t_prev_publish_mono_ns: int | None = None
+
     # ── 초기화 ────────────────────────────────────────────────────────────────
 
     def _init_camera(self):
@@ -233,6 +239,23 @@ class Pipeline:
         self._init_calibrator()
         self.pub.open()
         print("[Pipeline] SHM 오픈 완료 →", SHM_NAME)
+        # RT trace CSV open (--trace-csv 옵션 시)
+        if getattr(self.args, 'trace_csv', None):
+            import csv
+            # line-buffered (buffering=1) — crash 시 진정 *latest data 보존*
+            self._trace_fp = open(self.args.trace_csv, 'w', buffering=1)
+            self._trace_writer = csv.writer(self._trace_fp)
+            self._trace_writer.writerow([
+                'frame_id',
+                't0_mono_ns',          # frame start (Python perf_counter ns)
+                't1_fetch_done_perf',  # after RGB fetch (T2 진정 equiv)
+                't2_predict_done',     # after TRT inference
+                't3_depth3d_done',     # after 3D backproject + bone_bc
+                't4_publish_done_mono_ns',  # after SHM write
+                'interval_ms',         # publish-to-publish interval
+                'valid',
+            ])
+            print(f"[Pipeline] RT trace CSV → {self.args.trace_csv}")
         # 초기화 후, 루프 직전에 latency 방어 적용
         # (init에서 생긴 객체들 한번 정리 후 GC off)
         _apply_latency_defenses()
@@ -379,6 +402,26 @@ class Pipeline:
             method         = method,
         ))
         _t4 = time.perf_counter()
+
+        # ⑥.5 RT trace logging (--trace-csv 옵션 시, per-frame T0~T4)
+        if self._trace_writer is not None:
+            t4_publish_done_mono_ns = time.monotonic_ns()
+            interval_ms = (
+                (t4_publish_done_mono_ns - self._t_prev_publish_mono_ns) / 1e6
+                if self._t_prev_publish_mono_ns is not None else 0.0
+            )
+            self._t_prev_publish_mono_ns = t4_publish_done_mono_ns
+            self._trace_writer.writerow([
+                self._frame_id,
+                int(t0 * 1e9),         # T0 (frame start, perf_counter ns)
+                _t1,                    # T1 (after RGB fetch + release)
+                _t2,                    # T2 (after TRT inference)
+                _t3,                    # T3 (after depth_3d + bone_bc)
+                t4_publish_done_mono_ns,  # T4 (after SHM write, MONOTONIC ns)
+                f"{interval_ms:.3f}",
+                int(flexion.valid),
+            ])
+            self._frame_id += 1
 
         # ⑦ Plan D offline validation 용 dump (record-pose-npz)
         if getattr(self.args, 'record_pose_npz', None):
@@ -685,6 +728,14 @@ class Pipeline:
         self.pub.close()
         self.pub.unlink()
 
+        # RT trace CSV close (--trace-csv 활성화 시)
+        if self._trace_fp is not None:
+            try:
+                self._trace_fp.close()
+                print(f"[Pipeline] RT trace CSV closed ({self._frame_id} frames logged)")
+            except Exception as exc:
+                print(f"[Pipeline][WARN] trace CSV close failed: {exc}", file=sys.stderr)
+
         # Plan D offline validation 용 npz dump (record-pose-npz 활성화 시)
         if getattr(self.args, 'record_pose_npz', None) and hasattr(self, '_dump_buf'):
             out_path = self.args.record_pose_npz
@@ -768,6 +819,14 @@ def parse_args() -> argparse.Namespace:
         help="Plan D offline validation 용 pose 데이터 dump.\n"
              "  per-frame: (t_s, hip_z_world_m, joint_angles_rad, valid_mask)\n"
              "  shutdown 시 npz 저장. Plan D 의 cold-start + L1 검증 input.",
+    )
+    parser.add_argument(
+        "--trace-csv", dest="trace_csv", default=None, metavar="FILE",
+        help="RT analysis 용 per-frame timestamps CSV.\n"
+             "  columns: frame_id, t0_mono_ns, t1_fetch_done_perf, t2_predict_done,\n"
+             "           t3_depth3d_done, t4_publish_done_mono_ns, interval_ms, valid\n"
+             "  진정 true e2e (T0~T4) 측정 의 foundation.\n"
+             "  진정 jitter, drop detection 의무 reference.",
     )
     return parser.parse_args()
 
