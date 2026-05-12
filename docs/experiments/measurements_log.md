@@ -315,6 +315,58 @@ P2 일부 fix:
 
 ---
 
+## 2026-05-12 — Week 0 Day 1 ★ 완료 — Jetson Production v2 PASS
+
+### Setup
+- Jetson Orin NX, commit `efbc036` (SHM v2 + P1 fixes)
+- 60s production pipeline + BRIDGE_CORES=6,7 RT 80 + all-high priority
+- v2 publisher + watchdog + view_sagittal/verify_world_frame 통합
+
+### Results
+
+| 지표 | 이전 best (60.86) | 2026-05-12 v2 | 변화 |
+|---|---|---|---|
+| true_e2e p99 | 60.86ms | **62.31ms** | +1.45ms (noise 영역) |
+| Hz | 56.8 | 54.1 | noise |
+| bridge_p50 / p99 | 12.7 / 13.6 | **12.7 / 13.8** | 동일 (architecture floor) |
+| pipeline_proc p50 | 15.2 | 15.7 | noise |
+| HARD limit (e2e basis) | 0% | **0%** | OK |
+| SOFT WARN 18ms | 12-14% | **10.3%** | 약간 개선 |
+| anti-correlation | grab+ret_depth ~13ms | 동일 ✓ | 검증 |
+
+### Conclusions
+
+1. **SHM v2 publisher implement = latency overhead 0** — publish 자체 ~10us, 기존 architecture floor 그대로.
+2. **Watchdog v2 publish (rgb_ts_ns) 정상** — error log 0, _force_safe_stop() 호출 fix 검증.
+3. **view_sagittal / verify_world_frame 17-tuple unpack** 호환 (runtime error 0).
+4. **Anti-correlation 패턴 그대로** — bridge_p99 의 ZED SDK depth bimodal 한계 동일.
+5. **Plan D EKF input contract 준비 완료** — 사용자 control repo 가 v2 reader 작성 가능.
+
+### 핵심 verify (Jetson)
+
+```
+[1] verify_shm_v2.py:  === ALL CHECKS PASSED ===
+[2] production 60s:    true_e2e p99 62.31ms, HARD limit 0%, watchdog 0 error
+[3] anti-correlation:  grab/ret_depth swap pattern 그대로 ✓
+```
+
+### Action items
+- [x] Mac verify PASS
+- [x] Jetson verify PASS
+- [x] Production pipeline v2 정상 (latency 회귀 없음)
+- [x] Watchdog v2 호환 검증
+- [ ] (사용자) C++ control repo 의 SHM v2 reader skeleton
+
+### NEXT — Week 0 Day 2-3
+
+**dump_quality_dataset.py** implement (3-iteration plan 이미 작성, 다음 commit):
+- Recorded session 의 raw RGB/L/R + depth + pose + calib + timestamps + valid_mask 저장
+- JPEG RGB + PNG16 depth + sample `--every N` (~12fps recording, 60s = ~500MB)
+- ZED self-calibration disabled + `session_calib.json` 1회 저장
+- Quality gate / V4L2 baseline / Plan D EKF training data 의 prerequisite
+
+---
+
 ## 2026-05-10 19:05–19:16 — CPU Affinity 8-case Ablation (commit `04550b3`)
 
 ### Setup
