@@ -33,6 +33,7 @@ import numpy as np
 
 from .quality_dataset_io import QualityFrame, save_frame_npz
 from .zed_calib_load import disable_self_calib_and_snapshot
+from .shm_publisher import INVALID_NO_DETECTION, TS_DOMAIN_EPOCH
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,11 +58,13 @@ def main() -> int:
     ap.add_argument("--duration", type=float, default=60.0,
                     help="dump 시간 초 (default 60)")
     ap.add_argument("--every", type=int, default=5,
-                    help="N frame 마다 dump (default 5 = 12fps at 60Hz)")
+                    help="N frame 마다 dump (default 5 = 12fps at 60Hz). MUST >= 1.")
     ap.add_argument("--include-right", action="store_true",
                     help="right RGB 도 archive (V4L2 sparse stereo baseline)")
     ap.add_argument("--jpeg-quality", type=int, default=90,
-                    help="JPEG quality (default 90)")
+                    help="JPEG quality 1..100 (default 90)")
+    ap.add_argument("--max-grab-fails", type=int, default=100,
+                    help="연속 grab fail 의 최대 (이후 abort, default 100)")
     ap.add_argument("--calib-only", action="store_true",
                     help="session_calib.json 만 dump + exit")
     ap.add_argument("--force", action="store_true",
@@ -73,13 +76,41 @@ def main() -> int:
                         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
                         stream=sys.stdout)
 
+    # ★ Codex review b5kic9w4n P2-8 fix: CLI validation.
+    if args.every < 1:
+        LOGGER.error("--every must be >= 1, got %d", args.every)
+        return 1
+    if not (1 <= args.jpeg_quality <= 100):
+        LOGGER.error("--jpeg-quality must be 1..100, got %d", args.jpeg_quality)
+        return 1
+    if args.duration <= 0:
+        LOGGER.error("--duration must be > 0, got %f", args.duration)
+        return 1
+    if args.max_grab_fails < 1:
+        LOGGER.error("--max-grab-fails must be >= 1, got %d", args.max_grab_fails)
+        return 1
+
     output_dir: Path = args.output.resolve()
-    if output_dir.exists() and not args.force:
-        if any(output_dir.iterdir()):
+    if output_dir.exists() and any(output_dir.iterdir()):
+        if not args.force:
             LOGGER.error(
                 "output dir %s not empty — use --force 또는 다른 경로", output_dir
             )
             return 1
+        # ★ Codex P2-6 fix: --force 가 stale frame_*.npz 삭제 (clean rerun)
+        LOGGER.warning("--force: removing stale frame_*.npz + session_calib.json")
+        for stale in output_dir.glob("frame_*.npz"):
+            try:
+                stale.unlink()
+            except OSError as e:
+                LOGGER.warning("stale unlink fail %s: %s", stale, e)
+        for stale_name in ("session_calib.json",):
+            stale_path = output_dir / stale_name
+            if stale_path.exists():
+                try:
+                    stale_path.unlink()
+                except OSError:
+                    pass
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not _check_disk_space(output_dir):
@@ -107,9 +138,13 @@ def main() -> int:
         return 1
 
     try:
-        # session_calib.json
+        # session_calib.json (★ Codex P2-3, P2-4: explicit calibration provenance)
         calib_path = output_dir / "session_calib.json"
-        calib = disable_self_calib_and_snapshot(zed, calib_path)
+        calib = disable_self_calib_and_snapshot(
+            zed, calib_path,
+            self_calib_disabled=True,            # init.camera_disable_self_calib=True
+            depth_mode="PERFORMANCE",             # init.depth_mode=DEPTH_MODE.PERFORMANCE
+        )
         LOGGER.info(
             "session: zed_serial=%d baseline=%.2fmm fx=%.2f cx=%.2f",
             calib["zed_serial"], calib["baseline_mm"],
@@ -144,11 +179,26 @@ def main() -> int:
         grab_count = 0
         saved_count = 0
         total_bytes = 0
+        consecutive_grab_fails = 0   # ★ Codex P2-7
 
         while not stop_flag["stop"] and time.time() - t_start < args.duration:
-            if zed.grab(rt) != sl.ERROR_CODE.SUCCESS:
+            grab_result = zed.grab(rt)
+            if grab_result != sl.ERROR_CODE.SUCCESS:
+                consecutive_grab_fails += 1
+                # ★ Codex P2-7 fix: max retry 로 runaway 회피
+                if consecutive_grab_fails >= args.max_grab_fails:
+                    LOGGER.error(
+                        "grab failed %d consecutive times — abort",
+                        consecutive_grab_fails,
+                    )
+                    break
+                if consecutive_grab_fails <= 5 or consecutive_grab_fails % 50 == 0:
+                    LOGGER.warning(
+                        "grab fail #%d: %s", consecutive_grab_fails, grab_result
+                    )
                 time.sleep(0.001)
                 continue
+            consecutive_grab_fails = 0   # reset on success
             grab_count += 1
 
             # Sample every N frames
@@ -161,17 +211,24 @@ def main() -> int:
                 break
 
             # ZED capture
+            # ★ Codex review b5kic9w4n P2-7 fix: retrieve_* return code check
             rgb_ts_ns = zed.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_nanoseconds()
 
-            zed.retrieve_image(image_mat, sl.VIEW.LEFT)
+            if zed.retrieve_image(image_mat, sl.VIEW.LEFT) != sl.ERROR_CODE.SUCCESS:
+                LOGGER.warning("retrieve_image(LEFT) failed at frame %d", grab_count)
+                continue
             rgb_bgra = image_mat.get_data(deep_copy=True)   # (H, W, 4) uint8
 
             rgb_right_bgra = None
             if args.include_right:
-                zed.retrieve_image(image_right_mat, sl.VIEW.RIGHT)
+                if zed.retrieve_image(image_right_mat, sl.VIEW.RIGHT) != sl.ERROR_CODE.SUCCESS:
+                    LOGGER.warning("retrieve_image(RIGHT) failed at frame %d", grab_count)
+                    continue
                 rgb_right_bgra = image_right_mat.get_data(deep_copy=True)
 
-            zed.retrieve_measure(depth_mat, sl.MEASURE.DEPTH)
+            if zed.retrieve_measure(depth_mat, sl.MEASURE.DEPTH) != sl.ERROR_CODE.SUCCESS:
+                LOGGER.warning("retrieve_measure(DEPTH) failed at frame %d", grab_count)
+                continue
             depth_m = depth_mat.get_data(deep_copy=True).astype(np.float32, copy=False)
             # ZED depth 의 valid 픽셀 비율 (NaN/inf 제외)
             depth_invalid_ratio = float(
@@ -180,6 +237,8 @@ def main() -> int:
 
             # Pose: dump_quality_dataset 는 *raw frame 만* archive.
             # Plan D EKF 가 *별도 분석* 으로 pose 계산. 단 placeholder fields.
+            # ★ Codex review b5kic9w4n P1-2 fix: contradictory state 회피.
+            # valid_mask_bits=0 + valid_reason=VALID_OK 모순 → INVALID_NO_DETECTION 명시.
             K = 6
             kpts_2d = np.zeros((K, 2), dtype=np.float32)
             kpts_3d = np.zeros((K, 3), dtype=np.float32)
@@ -193,8 +252,10 @@ def main() -> int:
                 depth_ts_ns=rgb_ts_ns,            # same-frame
                 depth_age_us=0,
                 publish_done_mono_ns=time.monotonic_ns(),
-                valid_mask_bits=0,                 # pose 미계산 → all invalid
-                valid_reason=0,
+                valid_mask_bits=0,                                # pose 미계산
+                valid_reason=INVALID_NO_DETECTION,                # ★ P1-2: contradictory 회피
+                ts_domain=TS_DOMAIN_EPOCH,                        # ★ P1-1: explicit
+                valid=False,                                       # ★ P1-1: explicit (no pose)
                 world_frame_applied=False,
                 box_conf=0.0,
                 depth_invalid_ratio=depth_invalid_ratio,

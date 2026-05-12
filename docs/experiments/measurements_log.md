@@ -412,9 +412,67 @@ P2 일부 fix:
 
 ### Action items
 - [x] Mac verify PASS
+- [x] **Codex review b5kic9w4n (2 P1 + 9 P2 + 1 P3 발견, 5번째 review)**
+- [x] **Codex fix 모두 적용 (다음 commit)**
 - [ ] Jetson dump 실행 (60s session, ~150-500MB)
 - [ ] (사용자) C++ control repo 의 npz reader (또는 SHM v2 reader 와 같은 unpack)
 - [ ] 다음 phase: **pose computation 추가** (YOLO TRT batch on npz)
+
+---
+
+## 2026-05-12 — Week 0 Day 2 Codex review b5kic9w4n fix (2 P1 + 9 P2)
+
+### Codex review 결과 (token 281K, 5번째 review)
+
+**2 P1 (clinical blocker, 즉시 fix)**:
+1. QualityFrame ≠ SHM v2 17-tuple (ts_domain 누락, valid 분리)
+2. Pose placeholder contradictory (mask=0 + reason=VALID_OK → reader 가 valid 로 오해)
+
+**9 P2 fixes**:
+3. verify_frame_schema dtype/shape 미검증
+4. session_calib stereo_transform / disto length 미검증
+5. self_calibration_disabled 항상 True 거짓 가능
+6. depth_mode 가 image_size 에서 추출 (잘못)
+7. Frame writes non-atomic
+8. --force 가 stale 안 지움
+9. grab() 무한 retry
+10. CLI validation 부재
+11. pytest JPEG test random alpha invalid
+
+**1 P3**: C++ NPZ reader compat 미증명 (다음 phase)
+
+### Fix 적용 (commit 다음)
+
+**P1 fix**:
+- QualityFrame 에 ts_domain + valid 추가 → SHM v2 17-tuple positional 일치
+- Pose placeholder: valid_reason = INVALID_NO_DETECTION (VALID_OK 대신)
+
+**P2 fix**:
+- verify_frame_schema: dtype + shape (ndim/dim) 모두 검증
+- save_session_calib: stereo_transform 4x4 + disto length=5 검증
+- disable_self_calib_and_snapshot: self_calib_disabled, depth_mode caller 의무 (None 시 ValueError)
+- save_frame_npz: atomic write via temp + os.replace (uuid hidden tmp)
+- dump --force: 기존 frame_*.npz + session_calib.json 명시 삭제
+- dump grab fail: max-grab-fails (default 100) 후 abort
+- dump retrieve_image/measure: return code check (실패 시 skip)
+- dump CLI: --every >= 1, --jpeg-quality 1..100, --duration > 0 검증
+- save_frame_npz: jpeg_quality validate
+
+### Mac verify (post-fix) PASS — 8 sections all green
+
+### Conclusions
+
+1. **3-iteration self + 1 Codex review** 의 의지 = 진정 outside view 가 *2 P1 발견*.
+2. **사용자 의지 "10번씩 검토"** — 진정 *iter 11 (Codex) 후 다시 self-review* cycle 반복.
+3. **Plan D EKF compat 의 진정 완성** — SHM v2 17-tuple 와 quality_dataset 의 18-field 가 *positional 일치* (image blob 만 추가).
+4. **Production safety 강화** — atomic write, signal handler, CLI validation, grab fail abort.
+
+### Action items
+- [x] Codex review b5kic9w4n 의 fix 적용
+- [x] Mac verify ALL PASS (8 sections 30+ checks)
+- [ ] Jetson dump 실행 (verify + 10s short test)
+- [ ] (선택) Codex review 6번째 (큰 변경 후 again)
+- [ ] (사용자) C++ control repo 의 SHM v2 reader skeleton
 
 ---
 

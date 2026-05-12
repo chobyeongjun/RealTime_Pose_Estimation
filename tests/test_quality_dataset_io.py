@@ -59,6 +59,8 @@ def make_synthetic_frame(K: int = 6, H: int = 600, W: int = 960,
         publish_done_mono_ns=2_000_000_000,
         valid_mask_bits=(1 << K) - 1,
         valid_reason=0,
+        ts_domain=0,                          # ★ P1-1
+        valid=True,                            # ★ P1-1
         world_frame_applied=False,
         box_conf=0.85,
         depth_invalid_ratio=0.02,

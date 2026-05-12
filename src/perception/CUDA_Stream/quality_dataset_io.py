@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -50,6 +51,8 @@ REQUIRED_SCALAR_FIELDS = {
     "publish_done_mono_ns": (np.uint64, ()),
     "valid_mask_bits": (np.uint64, ()),
     "valid_reason": (np.uint8, ()),
+    "ts_domain": (np.uint8, ()),               # ★ Codex P1-1
+    "valid": (np.bool_, ()),                    # ★ Codex P1-1: SHM v2 의 valid_flag
     "world_frame_applied": (np.bool_, ()),
     "box_conf": (np.float32, ()),
     "depth_invalid_ratio": (np.float32, ()),
@@ -70,9 +73,18 @@ OPTIONAL_BLOB_FIELDS = ("rgb_right_bgra_jpeg",)
 
 @dataclass
 class QualityFrame:
-    """Per-frame quality dataset entry (Plan D EKF + V4L2 baseline compat)."""
+    """Per-frame quality dataset entry (Plan D EKF + V4L2 baseline compat).
 
-    # Scalars
+    ★ Codex review b5kic9w4n P1-1 fix (2026-05-12):
+    SHM v2 ShmReader.read() 의 17-tuple 와 *positional 일치*. archive 가
+    *image blobs* (rgb_bgra/depth_m/right) 를 *추가* (SHM 외 field).
+    """
+
+    # ★ Scalars — SHM v2 ShmReader 의 17-tuple order 일치 (image blob 만 추가):
+    #   (frame_id, rgb_ts_ns, depth_ts_ns, depth_age_us,
+    #    kpts_3d_m, kp_conf, kpts_2d_px, kp_sigma_m, pose_cov_diag,
+    #    box_conf, valid, depth_invalid_ratio, world_frame_applied,
+    #    publish_done_mono_ns, valid_reason, ts_domain, valid_mask_bits)
     frame_id: int
     rgb_ts_ns: int
     depth_ts_ns: int
@@ -80,6 +92,8 @@ class QualityFrame:
     publish_done_mono_ns: int
     valid_mask_bits: int
     valid_reason: int
+    ts_domain: int                 # ★ Codex P1-1: SHM v2 의 ts_domain (0=CLOCK_REALTIME)
+    valid: bool                    # ★ Codex P1-1: SHM v2 의 valid_flag (separate from mask bits)
     world_frame_applied: bool
     box_conf: float
     depth_invalid_ratio: float
@@ -91,7 +105,7 @@ class QualityFrame:
     kp_sigma_m: np.ndarray         # (K, 3) float32
     pose_cov_diag: np.ndarray      # (K, 3) float32
 
-    # Image blobs
+    # Image blobs (SHM v2 외, archive only)
     rgb_bgra: np.ndarray           # (H, W, 4) uint8 — encoded to JPEG on save
     depth_m: np.ndarray            # (H, W) float32 — raw
     rgb_right_bgra: Optional[np.ndarray] = None    # (H, W, 4) uint8 optional
@@ -148,13 +162,19 @@ def save_frame_npz(
     jpeg_quality: int = 90,
     compress: bool = True,
 ) -> int:
-    """Save QualityFrame to .npz.
+    """Save QualityFrame to .npz (atomic: temp + rename).
+
+    ★ Codex review b5kic9w4n P2-5 fix: atomic write via temp + os.replace.
+    disk-full / SIGINT 시 partial corrupt file 회피.
 
     Returns:
         Total bytes written (approximate).
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # validate inputs
+    if not (1 <= jpeg_quality <= 100):
+        raise ValueError(f"jpeg_quality must be 1..100, got {jpeg_quality}")
 
     # Encode RGB to JPEG
     rgb_jpeg = _encode_rgb_jpeg(frame.rgb_bgra, quality=jpeg_quality)
@@ -172,6 +192,8 @@ def save_frame_npz(
         "publish_done_mono_ns": np.uint64(frame.publish_done_mono_ns),
         "valid_mask_bits": np.uint64(frame.valid_mask_bits),
         "valid_reason": np.uint8(frame.valid_reason),
+        "ts_domain": np.uint8(frame.ts_domain),                          # ★ Codex P1-1
+        "valid": np.bool_(frame.valid),                                   # ★ Codex P1-1
         "world_frame_applied": np.bool_(frame.world_frame_applied),
         "box_conf": np.float32(frame.box_conf),
         "depth_invalid_ratio": np.float32(frame.depth_invalid_ratio),
@@ -190,10 +212,23 @@ def save_frame_npz(
     if rgb_right_jpeg is not None:
         data["rgb_right_bgra_jpeg"] = np.frombuffer(rgb_right_jpeg, dtype=np.uint8)
 
-    if compress:
-        np.savez_compressed(output_path, **data)
-    else:
-        np.savez(output_path, **data)
+    # ★ Codex P2-5: atomic write via temp + os.replace.
+    # POSIX rename 은 atomic — partial write 보임 X.
+    # numpy 가 '.npz' 가 아닌 path 에 자동 추가하므로, tmp 도 '.npz' 로 끝나게 (hidden).
+    import uuid
+    tmp_path = output_path.parent / f".{output_path.stem}.{uuid.uuid4().hex[:8]}.npz"
+    try:
+        if compress:
+            np.savez_compressed(tmp_path, **data)
+        else:
+            np.savez(tmp_path, **data)
+        os.replace(tmp_path, output_path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
     return output_path.stat().st_size
 
@@ -229,6 +264,8 @@ def load_frame_npz(input_path: Path) -> QualityFrame:
             publish_done_mono_ns=int(npz["publish_done_mono_ns"]),
             valid_mask_bits=int(npz["valid_mask_bits"]),
             valid_reason=int(npz["valid_reason"]),
+            ts_domain=int(npz["ts_domain"]),                      # ★ Codex P1-1
+            valid=bool(npz["valid"]),                             # ★ Codex P1-1
             world_frame_applied=bool(npz["world_frame_applied"]),
             box_conf=float(npz["box_conf"]),
             depth_invalid_ratio=float(npz["depth_invalid_ratio"]),
@@ -244,11 +281,14 @@ def load_frame_npz(input_path: Path) -> QualityFrame:
 
 
 def verify_frame_schema(npz_path: Path, expected_k: Optional[int] = None) -> None:
-    """Verify .npz file의 schema 정확성. raise on failure."""
+    """Verify .npz file의 schema 정확성. raise on failure.
+
+    ★ Codex review b5kic9w4n P2-1 fix: dtype + shape full validation.
+    """
     with np.load(npz_path, allow_pickle=False) as npz:
         files = set(npz.files)
 
-        # Required scalars
+        # Required scalars: name, dtype, shape 모두 검증
         for fname, (dtype, shape) in REQUIRED_SCALAR_FIELDS.items():
             if fname not in files:
                 raise ValueError(f"missing required scalar field: {fname}")
@@ -257,8 +297,12 @@ def verify_frame_schema(npz_path: Path, expected_k: Optional[int] = None) -> Non
                 raise ValueError(
                     f"{fname}: shape mismatch (expected {shape}, got {arr.shape})"
                 )
+            if arr.dtype != dtype:
+                raise ValueError(
+                    f"{fname}: dtype mismatch (expected {dtype}, got {arr.dtype})"
+                )
 
-        # Required arrays
+        # Required arrays: name, dtype, shape 모두 검증 (K-dependent)
         for fname, dtype, shape_spec in REQUIRED_ARRAY_FIELDS_DYNAMIC:
             if fname not in files:
                 raise ValueError(f"missing required array field: {fname}")
@@ -267,12 +311,34 @@ def verify_frame_schema(npz_path: Path, expected_k: Optional[int] = None) -> Non
                 raise ValueError(
                     f"{fname}: dtype mismatch (expected {dtype}, got {arr.dtype})"
                 )
-            # K consistency check (later)
+            # shape: ("K",) → (K,), ("K", 2) → (K, 2)
+            actual_shape = arr.shape
+            if len(actual_shape) != len(shape_spec):
+                raise ValueError(
+                    f"{fname}: ndim mismatch ({len(actual_shape)} vs {len(shape_spec)})"
+                )
+            for i, dim_spec in enumerate(shape_spec):
+                if dim_spec == "K":
+                    continue   # K consistency 후속 검증
+                if actual_shape[i] != dim_spec:
+                    raise ValueError(
+                        f"{fname}: dim {i} = {actual_shape[i]}, expected {dim_spec}"
+                    )
 
-        # Required blobs
+        # Required blobs: dtype 검증 (rgb_bgra_jpeg = uint8 bytes, depth_m = float32 2D)
         for fname in REQUIRED_BLOB_FIELDS:
             if fname not in files:
                 raise ValueError(f"missing required blob field: {fname}")
+        if npz["rgb_bgra_jpeg"].dtype != np.uint8:
+            raise ValueError(
+                f"rgb_bgra_jpeg dtype: {npz['rgb_bgra_jpeg'].dtype}, expected uint8"
+            )
+        if npz["depth_m"].dtype != np.float32:
+            raise ValueError(
+                f"depth_m dtype: {npz['depth_m'].dtype}, expected float32"
+            )
+        if npz["depth_m"].ndim != 2:
+            raise ValueError(f"depth_m ndim {npz['depth_m'].ndim}, expected 2")
 
         # K consistency: kpts_3d_m / kpts_2d_px / kp_conf / kp_sigma_m / pose_cov_diag
         ks = []
@@ -305,6 +371,7 @@ def save_session_calib(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # ★ Codex review b5kic9w4n P2-2 fix: stereo_transform 추가 + disto length check.
     required = (
         "version", "session_start_ns", "session_start_mono_ns",
         "zed_serial", "zed_sdk_version",
@@ -312,17 +379,31 @@ def save_session_calib(
         "self_calibration_disabled",
         "left_cam", "right_cam",
         "baseline_mm",
+        "stereo_transform",       # ★ P2-2
     )
     for k in required:
         if k not in calib:
             raise ValueError(f"session calib missing field: {k}")
 
-    # nested
+    # stereo_transform: 4x4 list
+    st = calib["stereo_transform"]
+    if not (isinstance(st, list) and len(st) == 4 and
+            all(isinstance(row, list) and len(row) == 4 for row in st)):
+        raise ValueError("stereo_transform must be 4x4 list of lists")
+
+    # nested cam: intrinsics + disto length=5
     for cam in ("left_cam", "right_cam"):
         cam_dict = calib[cam]
         for k in ("fx", "fy", "cx", "cy"):
             if k not in cam_dict:
                 raise ValueError(f"{cam} missing intrinsic: {k}")
+        if "disto" not in cam_dict:
+            raise ValueError(f"{cam} missing 'disto' (distortion coeffs)")
+        if not (isinstance(cam_dict["disto"], list) and len(cam_dict["disto"]) == 5):
+            raise ValueError(
+                f"{cam}.disto must be length-5 list (ZED model), got "
+                f"{type(cam_dict['disto']).__name__} len={len(cam_dict['disto']) if hasattr(cam_dict['disto'], '__len__') else 'N/A'}"
+            )
 
     with open(output_path, "w") as f:
         json.dump(calib, f, indent=2)

@@ -94,6 +94,7 @@ def main() -> int:
         frame_id=42, rgb_ts_ns=10**9, depth_ts_ns=10**9, depth_age_us=0,
         publish_done_mono_ns=10**9 + 1000,
         valid_mask_bits=(1 << K) - 1, valid_reason=0,
+        ts_domain=0, valid=True,           # ★ P1-1
         world_frame_applied=False,
         box_conf=0.85, depth_invalid_ratio=0.02,
         kpts_2d_px=kpts_2d, kpts_3d_m=kpts_3d, kp_conf=kp_conf,

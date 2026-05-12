@@ -18,7 +18,7 @@ import argparse
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .quality_dataset_io import save_session_calib, SCHEMA_VERSION
 
@@ -163,14 +163,33 @@ def snapshot_calib(zed: Any) -> Dict[str, Any]:
 def disable_self_calib_and_snapshot(
     zed: Any,
     output_path: Path,
+    self_calib_disabled: Optional[bool] = None,
+    depth_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Disable ZED self-calibration (verify init) + snapshot to JSON.
+    """Disable ZED self-calibration (caller 의 init 책임) + snapshot to JSON.
+
+    ★ Codex review b5kic9w4n P2-3, P2-4 fix:
+    - self_calib_disabled 은 caller 가 *정확한 init flag 의 값* 으로 전달.
+      None 이면 ValueError (silent True 금지).
+    - depth_mode 도 caller 가 init 시 사용한 *정확한 값* 으로 전달.
 
     InitParameters 의 `camera_disable_self_calib = True` 이미 설정 가정.
     snapshot + save.
     """
-    _try_disable_self_calibration(zed)
+    if self_calib_disabled is None:
+        raise ValueError(
+            "self_calib_disabled must be explicitly passed (True/False). "
+            "caller 의 InitParameters.camera_disable_self_calib 의 값."
+        )
+    if depth_mode is None:
+        raise ValueError(
+            "depth_mode must be explicitly passed (e.g., 'PERFORMANCE'). "
+            "caller 의 InitParameters.depth_mode 의 string."
+        )
     calib = snapshot_calib(zed)
+    # ★ Codex P2-3, P2-4: caller-provided 정직 값으로 override
+    calib["self_calibration_disabled"] = bool(self_calib_disabled)
+    calib["depth_mode"] = str(depth_mode)
     save_session_calib(output_path, calib)
     LOGGER.info("session calib saved: %s (zed_serial=%d, baseline=%.2fmm)",
                 output_path, calib["zed_serial"], calib["baseline_mm"])
@@ -207,7 +226,12 @@ def main() -> int:
         return 1
 
     try:
-        calib = disable_self_calib_and_snapshot(zed, args.output)
+        # ★ Codex P2-3, P2-4: explicit pass (init 값 의 정직 mirror)
+        calib = disable_self_calib_and_snapshot(
+            zed, args.output,
+            self_calib_disabled=True,           # CLI 가 init 시 True 명시 위
+            depth_mode="PERFORMANCE",            # CLI 가 init 시 PERFORMANCE 명시
+        )
         LOGGER.info("done: %s", calib["zed_serial"])
         return 0
     finally:
