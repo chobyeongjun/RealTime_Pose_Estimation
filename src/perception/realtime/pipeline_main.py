@@ -738,8 +738,8 @@ def parse_args() -> argparse.Namespace:
         help="TensorRT 비활성화 (PyTorch 직접 실행)",
     )
     parser.add_argument(
-        "--imgsz", type=int, default=480,
-        help="모델 입력 해상도 (기본 480, 정확도↑ 640)",
+        "--imgsz", type=int, default=640,
+        help="모델 입력 해상도 (기본 640 — CLAUDE.md 명시: 480 영구 거부)",
     )
     parser.add_argument(
         "--depth-mode", dest="depth_mode", default="PERFORMANCE",
