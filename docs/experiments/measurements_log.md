@@ -1013,3 +1013,83 @@ Xorg            top 5s sample 에 안 보임 (거의 idle)
 ---
 
 *Last updated: 2026-05-10*
+
+---
+
+## 2026-05-12 21:57 — Jetson ZED latency profile (3 measurements)
+
+### Setup
+- Jetson Orin NX (commit 39b60db), sudo nvpmodel -m 0 + jetson_clocks applied
+- ZED X Mini, SVGA 120fps, PERFORMANCE depth
+- scripts/jetson_latency_profile.py (30s run, 3601 frames per measurement)
+
+### Run #1 (commit d7b7399, BUG)
+**E SENSOR LATENCY: -1.78e12 ms** (huge negative)
+
+→ Reference mismatch BUG: `TIME_REFERENCE.IMAGE` (CLOCK_REALTIME epoch ns)
+   vs `time.monotonic_ns()` (CLOCK_MONOTONIC boot ns). 56 year offset.
+
+skiro/learn HIGH: "ZED SDK timestamp 비교 시 동일 reference 의무"
+
+### Run #2 (commit 39b60db, bug fixed)
+```
+stage                       mean      p50      p95      p99      max
+A grab()                    4.19     4.19     4.39     4.51     5.65
+B retrieve_image LEFT       2.34     2.34     2.41     2.44     2.60
+C retrieve_measure D        1.70     1.70     1.75     1.80     1.96
+D sl.Mat→np IMG             0.05     0.05     0.08     0.09     0.14
+D sl.Mat→np DEPTH           0.01     0.01     0.01     0.04     0.07
+E SENSOR LATENCY           13.97    13.96    14.23    14.38    15.79
+F frame_interval (loop)     8.33     8.33     8.53     8.65     9.88
+G image_ts_delta (drv)      8.33     8.33     8.35     8.36     8.48
+TOTAL grab+retrieve+np      8.33     8.33     8.54     8.70     9.19
+```
+
+### Codex review (commit 2a1e15d, 86,976 tokens)
+
+**My 3 wrong hypotheses, corrected by Codex**:
+
+1. ❌ "8.33ms = sensor latency floor"
+   ✓ **Throughput / frame cadence floor** (NOT latency). Sensor latency = E = 14ms separate.
+
+2. ❌ "5.4ms = Python overhead in PipelinedCamera"
+   ✓ *5.4ms = predict + 3D + SHM exact sum*. PipelinedCamera 제거 시 0-2ms gain
+     potential — A/B 검증 의무.
+
+3. ❌ "14ms = ZED architecture floor"
+   ✓ *SDK-visible frame age* (GMSL2 deserializer timestamp, NOT photon time).
+     Plausible (8-12ms range). master_plan_2026_05.md:227, shm_v2_packet_spec.md:73
+     이미 경고.
+
+### 진정 정정된 floor
+
+| Metric | Value | Note |
+|---|---|---|
+| Frame cadence (throughput) | 8.33ms | fps-bound, 못 줄임 |
+| SDK-visible sensor age (E) | 14ms p50 | one-frame SDK buffering |
+| Bridge layer (D, sl.Mat→np) | 0.05ms | 이미 zero-copy view ✓ |
+| docs claim "60ms" | OUTDATED | 진정 ≈ 14ms + 8ms pipeline ≈ 22ms |
+
+### Codex ranked reduction paths
+
+1. **PipelinedCamera A/B test** ← cheap, 0-2ms potential (scripts/jetson_pipelined_vs_serial.py 작성 됨)
+2. _batch_2d_to_3d profile → >1ms 시 GPU path
+3. Queue depth (이미 maxlen=2, leave alone)
+4. Async ZED / one-frame-late depth → UNSAFE per measurements_log.md:875
+5. C++ worker → last resort
+
+### Pipeline floor reasoning (Codex)
+
+```
+Pipeline floor = SDK-visible sensor age + host processing + publish/read sched
+              = 14ms + 8ms + δ
+              ≈ 22ms (raw)
++ Plan D EKF lookahead −50ms
+              ≈ −28ms effective (predicts ahead) ★
+```
+
+### Action items
+- [ ] Run jetson_pipelined_vs_serial.py → A/B verdict
+- [ ] Profile _batch_2d_to_3d (if >1ms, port to CUDA)
+- [ ] Track B 120fps test (currently 60fps): EKF measurement age 8.33ms vs 16.7ms
+
