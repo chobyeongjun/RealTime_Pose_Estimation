@@ -269,16 +269,24 @@ class TRTPoseEngine:
         else:
             return result
 
-        # GPU에서 confidence 필터 + top-1 (CPU 복사 최소화)
+        # GPU에서 confidence 필터 + top-1
         confs = out[:, conf_idx]  # (300,) GPU
         max_conf, best_idx = confs.max(dim=0)  # GPU에서 최대값
 
-        if max_conf.item() < self.conf_thresh:
+        # ★ Path C (2026-05-12): single CUDA sync wait
+        # 이전: max_conf.item() + kpts_gpu.cpu().numpy() = 2 separate syncs (~4ms)
+        # 새:   concat (1 conf + 18 kpts) → single GPU→CPU transfer (~2ms)
+        # 예상 gain: 2ms
+        top_cpu = torch.cat([
+            max_conf.unsqueeze(0),                                       # (1,)
+            out[best_idx, kpt_start:kpt_start + kpt_feats],              # (18,)
+        ]).cpu().numpy()   # ★ SINGLE sync wait
+
+        max_conf_val = float(top_cpu[0])
+        if max_conf_val < self.conf_thresh:
             return result
 
-        # keypoint 18개만 CPU로 복사 (7200개 대신 18개)
-        kpts_gpu = out[best_idx, kpt_start:kpt_start + kpt_feats]
-        kpts = kpts_gpu.cpu().numpy().reshape(self.num_kpts, 3)
+        kpts = top_cpu[1:].reshape(self.num_kpts, 3)
 
         # letterbox 역변환
         valid_count = 0
