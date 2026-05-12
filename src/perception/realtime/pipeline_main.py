@@ -118,6 +118,15 @@ except ImportError:
     except ImportError:
         compute_kp_sigma = None  # graceful fallback (uniform σ)
 
+# Forecast publisher (Plan D EKF forecast → /hwalker_forecast)
+try:
+    from forecast_publisher import ForecastPublisher  # type: ignore
+except ImportError:
+    try:
+        from src.perception.realtime.forecast_publisher import ForecastPublisher  # type: ignore
+    except ImportError:
+        ForecastPublisher = None
+
 # 6 keypoints ordering (Plan D spec, plan_d_predictor_spec.md):
 #   q[0] = left_hip,   q[1] = left_knee,  q[2] = left_ankle,
 #   q[3] = right_hip,  q[4] = right_knee, q[5] = right_ankle
@@ -150,6 +159,9 @@ class Pipeline:
         self.pub    = ShmPublisher(SHM_NAME)
         # SHM v2 publisher (--enable-shm-v2 옵션, 6 keypoints, Plan D contract)
         self.pub_v2: 'ShmPublisherV2 | None' = None
+        # Forecast publisher (--enable-plan-d 시, 별도 SHM /hwalker_forecast)
+        self.pub_forecast: 'ForecastPublisher | None' = None
+        self._forecast_tau_s: float = 0.050   # default 50ms lookahead
         self._camera_fx: float = 480.0   # ZED X Mini SVGA default — overridden in _init_camera
         self._camera_fy: float = 480.0
         self._camera_baseline_m: float = 0.063   # ZED X Mini baseline
@@ -342,6 +354,19 @@ class Pipeline:
             except Exception as exc:
                 print(f"[Pipeline][WARN] SHM v2 init failed: {exc}", flush=True)
                 self.pub_v2 = None
+        # Forecast publisher (Plan D EKF forecast publish)
+        if (self._predictor is not None and ForecastPublisher is not None
+                and getattr(self.args, 'enable_shm_v2', False)):
+            try:
+                self.pub_forecast = ForecastPublisher(
+                    name='hwalker_forecast', create=True,
+                )
+                print("[Pipeline] Forecast publisher → /hwalker_forecast "
+                      f"(τ={self._forecast_tau_s*1000:.0f}ms)")
+            except Exception as exc:
+                print(f"[Pipeline][WARN] Forecast publisher init failed: {exc}",
+                      flush=True)
+                self.pub_forecast = None
         # RT trace CSV open (--trace-csv 옵션 시)
         if getattr(self.args, 'trace_csv', None):
             import csv
@@ -639,6 +664,41 @@ class Pipeline:
                     sigma_per_joint=sigma_per_joint,
                     hip_z_world_m=hip_z,
                 )
+                # Forecast publish (Plan D EKF τ-ahead → /hwalker_forecast)
+                if self.pub_forecast is not None:
+                    try:
+                        fc = self._predictor.forecast(self._forecast_tau_s)
+                        hs_L = self._predictor.predict_heel_strike(
+                            "L", max_t_ahead_s=2.0, min_omega_rad_s=1.0,
+                        )
+                        hs_R = self._predictor.predict_heel_strike(
+                            "R", max_t_ahead_s=2.0, min_omega_rad_s=1.0,
+                        )
+                        self.pub_forecast.publish(
+                            frame_id=self._frame_id,
+                            publish_done_mono_ns=time.monotonic_ns(),
+                            tau_lookahead_s=self._forecast_tau_s,
+                            forecast=fc,
+                            cascade_level=int(self._predictor.level),
+                            stride_count=int(self._predictor.stride_count),
+                            template_touched_fraction=float(
+                                self._predictor.template_touched_fraction
+                            ),
+                            is_ready_for_control=bool(
+                                self._predictor.is_ready_for_control(
+                                    require_l3=False,
+                                    max_sigma_phi=2.0,
+                                    max_ambiguity=0.9,
+                                )
+                            ),
+                            hs_event_L=hs_L,
+                            hs_event_R=hs_R,
+                            q_pred_sigma=None,
+                        )
+                    except Exception as _exc_fc:
+                        if self._frame_id < 5:
+                            print(f"[Pipeline][WARN] Forecast publish failed: "
+                                  f"{_exc_fc}", flush=True)
                 # 매 200 frames 의무 console log (production 의 *진정 *영향 *최소*)
                 self._plan_d_log_counter += 1
                 if self._plan_d_log_counter >= self._plan_d_log_interval:
@@ -996,6 +1056,15 @@ class Pipeline:
                 print("[Pipeline] SHM v2 close 완료")
             except Exception as exc:
                 print(f"[Pipeline][WARN] SHM v2 close failed: {exc}", file=sys.stderr)
+
+        # Forecast publisher close
+        if self.pub_forecast is not None:
+            try:
+                self.pub_forecast.close()
+                print("[Pipeline] Forecast publisher close 완료")
+            except Exception as exc:
+                print(f"[Pipeline][WARN] Forecast publisher close failed: {exc}",
+                      file=sys.stderr)
 
         # RT trace CSV close (--trace-csv 활성화 시)
         if self._trace_fp is not None:
