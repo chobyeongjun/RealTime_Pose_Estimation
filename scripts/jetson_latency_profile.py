@@ -11,8 +11,10 @@
     B) retrieve_image (LEFT) — driver buffer → sl.Mat
     C) retrieve_measure (DEPTH) — driver buffer → sl.Mat
     D) sl.Mat → numpy copy time
-    E) image timestamp (ZED IMAGE_TIMESTAMP) vs grab return time
-       = sensor latency from capture moment to caller
+    E) sensor latency = ZED CURRENT timestamp - ZED IMAGE timestamp
+       (둘 모두 CLOCK_REALTIME epoch ns — 동일 reference 의무)
+       ⚠️ Bug fix 2026-05-12: 이전 버전이 time.monotonic_ns() (boot ns) 사용
+           → reference mismatch → huge negative (~-1.78e12 ms)
 
 진정 의미:
     A = ZED SDK 의 internal queue + ISP processing
@@ -93,6 +95,11 @@ def main():
     t_to_np_dep = deque(maxlen=10000)
     sensor_latency = deque(maxlen=10000)
     t_total = deque(maxlen=10000)
+    # Frame interval (jitter detection) + image timestamp delta (driver queue?)
+    frame_interval = deque(maxlen=10000)
+    image_ts_delta = deque(maxlen=10000)
+    prev_grab_t: float = -1.0
+    prev_image_ts_ns: int = -1
 
     t_start = time.perf_counter()
     n = 0
@@ -105,12 +112,22 @@ def main():
             continue
         t_grab.append((t1 - t0) * 1000)
 
-        # E) sensor latency: image timestamp vs now
-        # ZED IMAGE timestamp = nanoseconds since boot (CLOCK_MONOTONIC equivalent)
+        # E) sensor latency: ZED IMAGE timestamp vs ZED CURRENT timestamp
+        # ★ Bug fix 2026-05-12: 둘 모두 CLOCK_REALTIME ns since epoch — 동일 ref.
+        # 이전: time.monotonic_ns() (boot ns) ← reference mismatch → huge negative
         ts_image_ns = cam.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_nanoseconds()
-        t_now_mono_ns = int(time.monotonic_ns())
-        sensor_lat_ms = (t_now_mono_ns - ts_image_ns) / 1e6
+        ts_now_ns = cam.get_timestamp(sl.TIME_REFERENCE.CURRENT).get_nanoseconds()
+        sensor_lat_ms = (ts_now_ns - ts_image_ns) / 1e6
         sensor_latency.append(sensor_lat_ms)
+
+        # Frame interval (jitter / dropped frame detection)
+        if prev_grab_t > 0:
+            frame_interval.append((t1 - prev_grab_t) * 1000)
+        prev_grab_t = t1
+        # Image timestamp delta — driver-reported frame interval
+        if prev_image_ts_ns > 0:
+            image_ts_delta.append((ts_image_ns - prev_image_ts_ns) / 1e6)
+        prev_image_ts_ns = ts_image_ns
 
         # B) retrieve_image LEFT
         t2 = time.perf_counter()
@@ -150,19 +167,24 @@ def main():
     print("  RESULTS (per-frame latency ms)")
     print("=" * 60)
     arrs = [
-        ("A grab()             ", np.array(t_grab)),
-        ("B retrieve_image LEFT", np.array(t_retr_img)),
-        ("C retrieve_measure D ", np.array(t_retr_dep)),
-        ("D sl.Mat→np IMG      ", np.array(t_to_np_img)),
-        ("D sl.Mat→np DEPTH    ", np.array(t_to_np_dep)),
-        ("E SENSOR LATENCY     ", np.array(sensor_latency)),
-        ("TOTAL grab+retrieve+np", np.array(t_total)),
+        ("A grab()              ", np.array(t_grab)),
+        ("B retrieve_image LEFT ", np.array(t_retr_img)),
+        ("C retrieve_measure D  ", np.array(t_retr_dep)),
+        ("D sl.Mat→np IMG       ", np.array(t_to_np_img)),
+        ("D sl.Mat→np DEPTH     ", np.array(t_to_np_dep)),
+        ("E SENSOR LATENCY      ", np.array(sensor_latency)),
+        ("F frame_interval (loop)", np.array(frame_interval)),
+        ("G image_ts_delta (drv) ", np.array(image_ts_delta)),
+        ("TOTAL grab+retrieve+np ", np.array(t_total)),
     ]
-    print(f"  {'stage':<22} {'mean':>8} {'p50':>8} {'p95':>8} {'p99':>8} {'max':>8}")
-    print(f"  {'-'*22} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
+    print(f"  {'stage':<23} {'mean':>8} {'p50':>8} {'p95':>8} {'p99':>8} {'max':>8}")
+    print(f"  {'-'*23} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
     for name, arr in arrs:
+        if len(arr) == 0:
+            print(f"  {name:<23}  (no samples)")
+            continue
         print(
-            f"  {name:<22} "
+            f"  {name:<23} "
             f"{arr.mean():>7.2f}  "
             f"{np.percentile(arr, 50):>7.2f}  "
             f"{np.percentile(arr, 95):>7.2f}  "
