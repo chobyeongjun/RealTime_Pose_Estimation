@@ -380,6 +380,28 @@ class Pipeline:
         ))
         _t4 = time.perf_counter()
 
+        # ⑦ Plan D offline validation 용 dump (record-pose-npz)
+        if getattr(self.args, 'record_pose_npz', None):
+            if not hasattr(self, '_dump_buf'):
+                self._dump_buf = {
+                    't_s': [], 'hip_z_world_m': [], 'left_hip_z': [], 'right_hip_z': [],
+                    'left_knee_rad': [], 'right_knee_rad': [],
+                    'left_hip_rad': [], 'right_hip_rad': [],
+                    'valid': [],
+                }
+            l_hip_z = float(raw_3d.get('left_hip', (0.0, 0.0, np.nan))[2]) if raw_3d else np.nan
+            r_hip_z = float(raw_3d.get('right_hip', (0.0, 0.0, np.nan))[2]) if raw_3d else np.nan
+            hip_z_mean = np.nanmean([l_hip_z, r_hip_z]) if not (np.isnan(l_hip_z) and np.isnan(r_hip_z)) else np.nan
+            self._dump_buf['t_s'].append(ts_us * 1e-6)
+            self._dump_buf['hip_z_world_m'].append(hip_z_mean)
+            self._dump_buf['left_hip_z'].append(l_hip_z)
+            self._dump_buf['right_hip_z'].append(r_hip_z)
+            self._dump_buf['left_knee_rad'].append(np.deg2rad(flexion.left_knee_deg))
+            self._dump_buf['right_knee_rad'].append(np.deg2rad(flexion.right_knee_deg))
+            self._dump_buf['left_hip_rad'].append(np.deg2rad(flexion.left_hip_deg))
+            self._dump_buf['right_hip_rad'].append(np.deg2rad(flexion.right_hip_deg))
+            self._dump_buf['valid'].append(bool(flexion.valid))
+
         # release는 이미 get_rgb 직후에 호출됨 (new_api). 여기서는 아무것도 안 함.
 
         # ── 뼈 길이 ring buffer (최근 200f) 업데이트 ──
@@ -662,6 +684,29 @@ class Pipeline:
 
         self.pub.close()
         self.pub.unlink()
+
+        # Plan D offline validation 용 npz dump (record-pose-npz 활성화 시)
+        if getattr(self.args, 'record_pose_npz', None) and hasattr(self, '_dump_buf'):
+            out_path = self.args.record_pose_npz
+            try:
+                np.savez(
+                    out_path,
+                    t_s=np.array(self._dump_buf['t_s'], dtype=np.float64),
+                    hip_z_world_m=np.array(self._dump_buf['hip_z_world_m'], dtype=np.float64),
+                    left_hip_z=np.array(self._dump_buf['left_hip_z'], dtype=np.float64),
+                    right_hip_z=np.array(self._dump_buf['right_hip_z'], dtype=np.float64),
+                    left_knee_rad=np.array(self._dump_buf['left_knee_rad'], dtype=np.float64),
+                    right_knee_rad=np.array(self._dump_buf['right_knee_rad'], dtype=np.float64),
+                    left_hip_rad=np.array(self._dump_buf['left_hip_rad'], dtype=np.float64),
+                    right_hip_rad=np.array(self._dump_buf['right_hip_rad'], dtype=np.float64),
+                    valid=np.array(self._dump_buf['valid'], dtype=bool),
+                    method=str(self.args.method),
+                )
+                n = len(self._dump_buf['t_s'])
+                print(f"[Pipeline] Pose dump saved: {out_path} ({n} frames)")
+            except Exception as exc:
+                print(f"[Pipeline][WARN] Pose dump failed: {exc}", file=sys.stderr)
+
         print("[Pipeline] SHM 해제 완료. 종료.")
 
 
@@ -717,6 +762,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bone-tol", dest="bone_tol", type=float, default=0.20,
         help="Bone constraint 동작 중 ref 대비 허용 편차 비율 (기본 0.20 = ±20%).",
+    )
+    parser.add_argument(
+        "--record-pose-npz", dest="record_pose_npz", default=None, metavar="FILE",
+        help="Plan D offline validation 용 pose 데이터 dump.\n"
+             "  per-frame: (t_s, hip_z_world_m, joint_angles_rad, valid_mask)\n"
+             "  shutdown 시 npz 저장. Plan D 의 cold-start + L1 검증 input.",
     )
     return parser.parse_args()
 
