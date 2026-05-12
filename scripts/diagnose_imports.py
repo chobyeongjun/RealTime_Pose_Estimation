@@ -30,6 +30,33 @@ def main():
             print(f"  ERR  {module:<20} → {type(e).__name__}: {e}")
 
     print()
+    print("── pipeline_main.py atomic import chain (the real test) ──")
+    # Mimic pipeline_main.py:72-79 atomic try block
+    try:
+        from postprocess_accel import batch_2d_to_3d as _batch_2d_to_3d
+        print("  OK   from postprocess_accel import batch_2d_to_3d")
+    except ImportError as e:
+        print(f"  FAIL from postprocess_accel import batch_2d_to_3d: {e}")
+    except Exception as e:
+        print(f"  ERR  from postprocess_accel import batch_2d_to_3d: {type(e).__name__}: {e}")
+
+    try:
+        from zed_camera import create_camera as _create_camera, PipelinedCamera
+        print("  OK   from zed_camera import create_camera, PipelinedCamera")
+    except ImportError as e:
+        print(f"  FAIL from zed_camera import create_camera, PipelinedCamera: {e}")
+    except Exception as e:
+        print(f"  ERR  from zed_camera import create_camera, PipelinedCamera: {type(e).__name__}: {e}")
+
+    try:
+        from trt_pose_engine import TRTPoseEngine
+        print("  OK   from trt_pose_engine import TRTPoseEngine")
+    except ImportError as e:
+        print(f"  FAIL from trt_pose_engine import TRTPoseEngine: {e}")
+    except Exception as e:
+        print(f"  ERR  from trt_pose_engine import TRTPoseEngine: {type(e).__name__}: {e}")
+
+    print()
     print("── Find missing modules on Jetson ──")
     for name in ['postprocess_accel', 'trt_pose_engine']:
         try:
