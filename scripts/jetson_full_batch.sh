@@ -1,22 +1,16 @@
 #!/usr/bin/env bash
-# 진정 single-batch Jetson test — *진정 *모든 측정 한번에*.
+# 진정 single-batch Jetson test — sudo 의 root user 환경 손실 문제 fix.
 #
 # 사용자 의지 (2026-05-12):
 #   "한번에 모두 진행하고 데이터 결과도 한번에 나올 수 있도록"
-#   "코드 모두 구현해두고 그 다음에는 빠르게 진행"
 #
-# 사용 (Jetson):
+# 사용 (Jetson, ⚠ sudo 사용 X — user 모드):
 #   cd ~/realtime-vision-control
 #   git pull origin local_backup
-#   sudo bash scripts/jetson_full_batch.sh 2>&1 | tee /tmp/full_batch.log
+#   bash scripts/jetson_full_batch.sh 2>&1 | tee /tmp/full_batch.log
 #
-# sudo 의무 (nvpmodel + jetson_clocks).
-#
-# 진행:
-#   1. Phase 1.5/2 verify (215 Plan D tests)
-#   2. Production 60s with --trace-csv
-#   3. analyze_trace.py — per-stage p50/p95/p99/max
-#   4. Summary table
+# nvpmodel + jetson_clocks 는 의무 sudo — script 내부 sudo 명시.
+# Python pipeline (tensorrt/torch/pyzed) 는 의무 user 모드 (root 의 PYTHONPATH 손실 방지).
 
 set +e
 set -o pipefail   # silent pass 방지
@@ -28,8 +22,12 @@ RED='\033[0;31m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${YELLOW}NOTE: sudo 권유 — nvpmodel/jetson_clocks 의무${NC}"
+if [ "$EUID" -eq 0 ]; then
+    echo -e "${RED}ERROR: 이 script 는 user 모드 의무 실행.${NC}"
+    echo "  sudo 시 root 의 PYTHONPATH 에 user packages (tensorrt/torch/pyzed) 가 없음."
+    echo "  Usage: bash scripts/jetson_full_batch.sh  (no sudo)"
+    echo "  nvpmodel/jetson_clocks 는 script 내부 sudo 로 진행."
+    exit 1
 fi
 
 echo "============================================================"
@@ -39,13 +37,13 @@ echo "  Commit: $(git rev-parse --short HEAD)"
 echo "============================================================"
 echo ""
 
-# ─── Phase 1: Performance mode ──────────────────────────────────────────
-echo "── Phase 1: nvpmodel -m 0 + jetson_clocks ──"
-nvpmodel -m 0 2>&1 | sed 's/^/  /' || true
-jetson_clocks 2>&1 | sed 's/^/  /' || true
+# ─── Phase 1: Performance mode (sudo 의무) ──────────────────────────────
+echo "── Phase 1: nvpmodel -m 0 + jetson_clocks (sudo) ──"
+sudo nvpmodel -m 0 2>&1 | sed 's/^/  /' || true
+sudo jetson_clocks 2>&1 | sed 's/^/  /' || true
 echo ""
 
-# ─── Phase 2: Plan D verify (215 tests) ─────────────────────────────────
+# ─── Phase 2: Plan D verify (215 tests, user mode) ──────────────────────
 echo "── Phase 2: Plan D Phase 1.5 + Phase 2 verify (215 tests) ──"
 PYTHONPATH=src python3 -m pytest \
     -p no:anyio -p no:asyncio \
@@ -64,8 +62,8 @@ PYTHONPATH=src python3 -m pytest \
 RC_PHASE2=$?
 echo ""
 
-# ─── Phase 3: Production 60s + trace logging ────────────────────────────
-echo "── Phase 3: Production 60s + RT trace logging ──"
+# ─── Phase 3: Production 60s + trace logging (user mode!) ───────────────
+echo "── Phase 3: Production 60s + RT trace logging (user mode) ──"
 TRACE_CSV=/tmp/production_trace_$(date +%H%M%S).csv
 
 PYTHONPATH=src:src/perception/benchmarks timeout 60 \
@@ -88,7 +86,17 @@ else
 fi
 echo ""
 
-# ─── Phase 5: Summary ───────────────────────────────────────────────────
+# ─── Phase 5: cpp_ext detection (postprocess_accel build path) ──────────
+echo "── Phase 5: cpp_ext build path detection (Python overhead 분해) ──"
+echo "  현재 src/perception/benchmarks/cpp_ext/ 위치 확인..."
+ls -la src/perception/benchmarks/cpp_ext/ 2>&1 | head -5 || echo "  → 위치 X"
+echo "  Jetson 의 다른 location 의 cpp_ext find..."
+find /home/chobb0 -type d -name "cpp_ext" 2>/dev/null | head -5
+echo "  Jetson 의 *.so (pose_postprocess_cpp) find..."
+find /home/chobb0 -name "pose_postprocess_cpp*" 2>/dev/null | head -5
+echo ""
+
+# ─── Phase 6: Summary ───────────────────────────────────────────────────
 echo "============================================================"
 echo "=== FULL BATCH SUMMARY ==="
 echo "============================================================"
@@ -100,7 +108,7 @@ fi
 
 if [ -f "$TRACE_CSV" ]; then
     N_FRAMES=$(wc -l < "$TRACE_CSV")
-    echo -e "  ${GREEN}✓${NC} Production trace: $N_FRAMES lines (header + frames)"
+    echo -e "  ${GREEN}✓${NC} Production trace: $N_FRAMES lines"
 else
     echo -e "  ${RED}✗${NC} Production trace: not created"
 fi
@@ -110,5 +118,6 @@ echo "  Production log: /tmp/production_full.log"
 echo "  Trace CSV:      $TRACE_CSV"
 echo ""
 echo "  진정 paste 의무:"
-echo "    1. analyze_trace 의 *최종 *per-stage table* + warmup analysis"
+echo "    1. analyze_trace 의 *진정 *per-stage table*"
 echo "    2. /tmp/production_full.log 의 *마지막 [PROFILE]*"
+echo "    3. Phase 5 의 *cpp_ext find result*"
