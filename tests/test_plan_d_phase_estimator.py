@@ -125,18 +125,20 @@ def test_estimator_noise_robustness():
 # ─── Confidence ──────────────────────────────────────────────────────────
 
 
-def test_estimator_confidence_low_for_sharp_match():
-    """At clean φ_true on a well-trained sinusoidal template, confidence
-    should be low (sharp minimum vs second-best)."""
+def test_estimator_ambiguity_low_for_sharp_match():
+    """At clean φ_true on a well-trained sinusoidal template, ambiguity_ratio
+    should be LOW (sharp minimum vs second-best — low = sharp = trustworthy)."""
     t = _build_sinusoidal_template()
     est = CrossCorrPhaseEstimator(t)
     q = np.array([math.sin(1.0 + k * math.pi / 6) for k in range(t.n_joints)])
     result = est.estimate(q)
-    assert result.confidence < 0.5, f"Confidence not sharp: {result.confidence}"
+    assert result.ambiguity_ratio < 0.5, (
+        f"ambiguity_ratio not sharp: {result.ambiguity_ratio}"
+    )
 
 
-def test_estimator_confidence_high_for_ambiguous():
-    """Flat template (no phase info) → high confidence ratio (ambiguous)."""
+def test_estimator_ambiguity_high_for_ambiguous():
+    """Flat template (no phase info) → high ambiguity_ratio (no preferred φ)."""
     t = CycleTemplate(beta_default=0.10)
     # Fill all bins with same q → no phase discrimination
     for bin_i in range(128):
@@ -147,8 +149,48 @@ def test_estimator_confidence_high_for_ambiguous():
         for bin_i in range(128):
             t.update(bin_i * TWO_PI / 128, np.ones(6))
     result = est.estimate(np.ones(6))
-    # All bins identical → no preferred φ → confidence ~1
-    assert result.confidence > 0.5, f"Confidence not high for ambiguous: {result.confidence}"
+    # All bins identical → no preferred φ → ambiguity_ratio ~1
+    assert result.ambiguity_ratio > 0.5, (
+        f"ambiguity_ratio not high for ambiguous: {result.ambiguity_ratio}"
+    )
+
+
+def test_estimator_sigma_floor_prevents_numerical_blowup():
+    """Codex NEEDS_FIX #9: sigma_per_joint=0 (numerically near-zero) must not
+    cause inverse-variance explosion."""
+    t = _build_sinusoidal_template()
+    est = CrossCorrPhaseEstimator(t)
+    phi_true = 1.0
+    q = np.array([math.sin(phi_true + k * math.pi / 6) for k in range(t.n_joints)])
+    # Extremely tight sigma — would have produced inv_var=1e12 pre-fix
+    sigma = np.full(t.n_joints, 1e-12)
+    result = est.estimate(q, sigma_per_joint=sigma)
+    assert result.valid
+    assert math.isfinite(result.phi)
+    assert math.isfinite(result.cost)
+    # Despite extreme tight sigma, phase recovery should still work
+    err = abs(float((result.phi - phi_true + math.pi) % (2 * math.pi) - math.pi))
+    assert err < 0.1, f"Phase recovery broken under sigma floor: {err}"
+
+
+def test_estimator_sigma_nan_treated_as_floor():
+    """NaN sigma entries should be clamped to floor, not propagated."""
+    t = _build_sinusoidal_template()
+    est = CrossCorrPhaseEstimator(t)
+    q = np.array([math.sin(1.0 + k * math.pi / 6) for k in range(t.n_joints)])
+    sigma = np.array([1.0, float("nan"), 1.0, 1.0, 1.0, 1.0])
+    result = est.estimate(q, sigma_per_joint=sigma)
+    assert result.valid
+    assert math.isfinite(result.phi)
+
+
+def test_estimator_invalid_sigma_floor_raises():
+    """sigma_floor must be > 0."""
+    t = _build_sinusoidal_template()
+    with pytest.raises(ValueError):
+        CrossCorrPhaseEstimator(t, sigma_floor=0.0)
+    with pytest.raises(ValueError):
+        CrossCorrPhaseEstimator(t, sigma_floor=-0.01)
 
 
 # ─── Sigma weighting ─────────────────────────────────────────────────────

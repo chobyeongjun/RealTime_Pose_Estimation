@@ -38,11 +38,15 @@ from perception.plan_d_prototype.utils import (
     joseph_update,
     bin_of_phase,
 )
-from perception.plan_d_prototype.ekf_l1 import EKFL1, EKFL1State
+from perception.plan_d_prototype.ekf_l1 import EKFL1, EKFL1State, PredictStatus
 from perception.plan_d_prototype.cycle_template import CycleTemplate
 from perception.plan_d_prototype.phase_estimator import (
     CrossCorrPhaseEstimator,
     PhaseEstimate,
+)
+from perception.plan_d_prototype.hilbert_phase import (
+    HilbertPhaseResult,
+    HipVerticalPhaseEstimator,
 )
 
 __all__ = [
@@ -54,7 +58,10 @@ __all__ = [
     "bin_of_phase",
     "EKFL1",
     "EKFL1State",
+    "PredictStatus",
     "CycleTemplate",
     "CrossCorrPhaseEstimator",
     "PhaseEstimate",
+    "HilbertPhaseResult",
+    "HipVerticalPhaseEstimator",
 ]

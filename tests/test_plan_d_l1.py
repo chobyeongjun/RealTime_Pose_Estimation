@@ -19,6 +19,7 @@ from perception.plan_d_prototype.ekf_l1 import (
     _DEFAULT_INITIAL_OMEGA,
     EKFL1,
     EKFL1State,
+    PredictStatus,
 )
 from perception.plan_d_prototype.utils import TWO_PI, wrap_to_pi
 
@@ -319,6 +320,133 @@ def test_l1_condition_number_finite():
     cn = ekf.condition_number_P()
     assert math.isfinite(cn)
     assert cn < 1e10, f"Condition number too high: {cn}"
+
+
+# ─── Codex Phase 1.5 — NEEDS_FIX coverage tests ───────────────────────────
+
+
+def test_l1_predict_status_initial():
+    """First predict() returns INITIAL — no integration."""
+    ekf = EKFL1()
+    status = ekf.predict(100.0)
+    assert status == PredictStatus.INITIAL
+
+
+def test_l1_predict_status_ok_normal():
+    """Second predict() with valid dt returns OK."""
+    ekf = EKFL1()
+    ekf.predict(0.0)
+    status = ekf.predict(0.01)
+    assert status == PredictStatus.OK
+
+
+def test_l1_predict_status_dt_non_positive():
+    """Clock going backward returns DT_NON_POSITIVE."""
+    ekf = EKFL1()
+    ekf.predict(0.1)
+    status = ekf.predict(0.05)
+    assert status == PredictStatus.DT_NON_POSITIVE
+
+
+def test_l1_predict_status_dt_zero_non_positive():
+    """dt=0 is also non-positive (no information added)."""
+    ekf = EKFL1()
+    ekf.predict(0.1)
+    status = ekf.predict(0.1)
+    assert status == PredictStatus.DT_NON_POSITIVE
+
+
+def test_l1_predict_status_dt_too_large():
+    """dt > max_dt_s returns DT_TOO_LARGE — caller must trigger watchdog."""
+    ekf = EKFL1(max_dt_s=0.5)
+    ekf.predict(0.0)
+    status = ekf.predict(1.0)
+    assert status == PredictStatus.DT_TOO_LARGE
+    # Critical: even though state did NOT integrate, t_last MUST advance
+    # so the next call sees a fresh, small dt.
+    assert ekf.state.t_last == 1.0
+
+
+def test_l1_predict_status_nan_inf():
+    """NaN / inf t_now reports T_NOT_FINITE."""
+    ekf = EKFL1()
+    ekf.predict(0.0)
+    assert ekf.predict(float("nan")) == PredictStatus.T_NOT_FINITE
+    assert ekf.predict(float("inf")) == PredictStatus.T_NOT_FINITE
+
+
+def test_l1_update_returns_bool():
+    """update() returns True when applied, False on skip — for caller diagnostics."""
+    ekf = EKFL1()
+    ekf.predict(0.0)
+    assert ekf.update(1.0) is True
+    # NaN observation
+    assert ekf.update(float("nan")) is False
+    # Negative R
+    assert ekf.update(1.0, R_override=-0.1) is False
+    # Zero R
+    assert ekf.update(1.0, R_override=0.0) is False
+    # NaN R
+    assert ekf.update(1.0, R_override=float("nan")) is False
+    # Inf R
+    assert ekf.update(1.0, R_override=float("inf")) is False
+
+
+def test_l1_update_negative_R_does_not_corrupt_state():
+    """Negative R must NOT poison Joseph form — state must stay sane."""
+    ekf = EKFL1()
+    ekf.predict(0.0)
+    x_before = ekf.state.x.copy()
+    P_before = ekf.state.P.copy()
+    applied = ekf.update(1.0, R_override=-0.5)
+    assert applied is False
+    assert np.allclose(ekf.state.x, x_before)
+    assert np.allclose(ekf.state.P, P_before)
+
+
+def test_l1_q_discretization_exact_form():
+    """Q_d must match integrated continuous-discrete form (Codex NEEDS_FIX #1).
+
+    For q_omega white noise on omega:
+        Q_d[0,0] = q_omega × dt^3/3 + q_phi × dt
+        Q_d[0,1] = Q_d[1,0] = q_omega × dt^2/2
+        Q_d[1,1] = q_omega × dt
+    """
+    q_phi = 1e-6
+    q_omega = 4e-2
+    dt = 0.01
+    ekf = EKFL1(process_noise_phi=q_phi, process_noise_omega=q_omega)
+    Q_d = ekf._build_Qd(dt)
+    expected_00 = q_omega * dt**3 / 3.0 + q_phi * dt
+    expected_01 = q_omega * dt**2 / 2.0
+    expected_11 = q_omega * dt
+    assert abs(Q_d[0, 0] - expected_00) < 1e-15
+    assert abs(Q_d[0, 1] - expected_01) < 1e-15
+    assert abs(Q_d[1, 0] - expected_01) < 1e-15
+    assert abs(Q_d[1, 1] - expected_11) < 1e-15
+    # Symmetric
+    assert Q_d[0, 1] == Q_d[1, 0]
+    # PSD: 2x2 form is PSD iff det >= 0 (already symmetric)
+    det = Q_d[0, 0] * Q_d[1, 1] - Q_d[0, 1] * Q_d[1, 0]
+    assert det >= -1e-15, f"Q_d not PSD: det={det}"
+
+
+def test_l1_q_discretization_phi_omega_coupling():
+    """Sanity: Q_d[0,1] != 0 — naive diag(q_phi, q_omega) × dt would have 0 here.
+
+    This is the Codex fix: integrated noise couples phi and omega.
+    """
+    ekf = EKFL1(process_noise_phi=0.0, process_noise_omega=1.0)
+    Q_d = ekf._build_Qd(0.01)
+    assert Q_d[0, 1] > 0, "Coupling term missing — naive Q_c × dt would zero this"
+
+
+def test_l1_initial_P_reduced_from_pi_squared():
+    """Codex NEEDS_FIX #3: initial P_phi reduced from π² to 1.0."""
+    ekf = EKFL1()
+    # P_phi should be sigma ~ 1 rad, not sigma ~ π rad
+    sigma_phi = ekf.state.sigma_phi
+    assert 0.5 <= sigma_phi <= 2.0, f"Initial sigma_phi out of expected range: {sigma_phi}"
 
 
 if __name__ == "__main__":

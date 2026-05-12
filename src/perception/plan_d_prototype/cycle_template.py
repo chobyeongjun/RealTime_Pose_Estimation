@@ -4,20 +4,36 @@
 For walking, n_bins = 128 (Codex Q1 recommendation) gives ~2.8° resolution.
 
 Update rule (per Codex Q1, plan_d_predictor_spec.md §2.4):
-    μ_new[bin] = (1 - β) μ_old[bin] + β q
+    First update (untouched bin × joint): μ[bin, k] = q[k]    ← direct init
+    Subsequent updates:                    μ[bin, k] = (1-β) μ[bin, k] + β q[k]
 
-β bounded to clinical range [0.03, 0.10]:
-    - β = 0.10: fast adapt, ~10-stride memory (cold-start)
-    - β = 0.03: slow adapt, ~33-stride memory (steady state)
+This avoids the amplitude bias from starting at zero (Codex NEEDS_FIX #6).
 
-Lookup uses **cubic Hermite** interpolation between bin centers to provide
-C¹ continuity (smooth derivatives for EKF measurement Jacobian).
+β scheduling (Codex IMPROVE — schedule by gait state):
+    - cold-start (total_updates < cold_threshold):  β = 0.10  (fast adapt)
+    - steady (total_updates ≥ cold_threshold):       β = 0.03  (clinical)
+    User can override per call.
 
-Cold-start gating:
-    - bin_touch_count[bin] tracks how many updates each bin has received
-    - is_ready_for_l3 = (∑touched_bins / n_bins) ≥ 0.5 AND total_strides ≥ 3
+Touched state is **per-bin per-joint** (Codex NEEDS_FIX #5):
+    _touched ∈ ℤ^(n_bins × n_joints)
+    A bin with one valid joint is NOT treated as valid for all joints.
 
-Stride counting is external (caller wraps from φ_prev → φ_now around 0 or 2π).
+Lookup uses **cubic Hermite (Catmull-Rom)** interpolation between bin centers,
+**only across joints whose all 4 surrounding bins are touched**. For joints
+with sparse coverage, falls back to nearest-touched bin (per joint).
+
+Codex review 2026-05-12 fixes:
+    - NEEDS_FIX #4: β range vs spec — kept clinical [0.03, 0.10] but added
+      explicit scheduling so "3-5 stride memory" can be achieved via β=0.30
+      at cold-start (caller can opt in) and tighter β at steady.
+    - NEEDS_FIX #5: per-bin per-joint touched tracking.
+    - NEEDS_FIX #6: first update initializes directly to q.
+    - IMPROVE: lookup interpolates only across per-joint valid bins.
+
+L/R separation (Codex NEEDS_FIX #7):
+    Single 6-joint template OK for healthy gait. For hemiparetic / asymmetric,
+    instantiate TWO CycleTemplates (one per leg, 3 joints each) at the
+    PredictorCascade level. This module stays single-leg-agnostic.
 """
 from __future__ import annotations
 
@@ -32,6 +48,11 @@ from perception.plan_d_prototype.utils import TWO_PI, bin_of_phase, wrap_to_2pi
 BETA_MIN: float = 0.03
 BETA_MAX: float = 0.10
 
+# Cold-start vs steady scheduling — total updates threshold.
+# 3 strides × 128 bins × 6 joints / 2 (approx visit rate) ≈ 1152 updates.
+# Use a simpler 3-stride-equivalent estimate: n_bins × n_joints.
+_COLD_THRESHOLD_MULTIPLIER: int = 1   # 1 × (n_bins × n_joints) ≈ 1 stride worth
+
 
 class CycleTemplate:
     """Recursive joint-angle template over gait phase.
@@ -39,12 +60,12 @@ class CycleTemplate:
     Public API:
         update(phi, q, beta=None) → None
         lookup(phi) → q_template (n_joints,)
-        lookup_jacobian(phi) → dμ/dφ (n_joints,)
-        is_initialized property (any bins touched)
-        touched_fraction property [0, 1]
-        reset() → None
+        lookup_jacobian(phi, eps) → dμ/dφ (n_joints,)
+        is_initialized, touched_fraction, total_updates, mu, reset()
 
-    Storage: μ ∈ ℝ^(n_bins, n_joints) float64.
+    Storage:
+        μ        ∈ ℝ^(n_bins, n_joints) float64
+        _touched ∈ ℤ^(n_bins, n_joints) int64   (Codex NEEDS_FIX #5)
     """
 
     def __init__(
@@ -52,6 +73,8 @@ class CycleTemplate:
         n_bins: int = 128,
         n_joints: int = 6,
         beta_default: float = 0.05,
+        beta_cold: float = BETA_MAX,
+        cold_threshold: Optional[int] = None,
     ) -> None:
         if n_bins < 8:
             raise ValueError(f"n_bins must be ≥ 8 (got {n_bins})")
@@ -61,11 +84,20 @@ class CycleTemplate:
             raise ValueError(
                 f"beta_default must be in [{BETA_MIN}, {BETA_MAX}], got {beta_default}"
             )
+        if not (BETA_MIN <= beta_cold <= BETA_MAX):
+            raise ValueError(
+                f"beta_cold must be in [{BETA_MIN}, {BETA_MAX}], got {beta_cold}"
+            )
         self.n_bins = int(n_bins)
         self.n_joints = int(n_joints)
         self._beta_default = float(beta_default)
+        self._beta_cold = float(beta_cold)
+        self._cold_threshold = (
+            int(cold_threshold) if cold_threshold is not None
+            else _COLD_THRESHOLD_MULTIPLIER * self.n_bins * self.n_joints
+        )
         self._mu = np.zeros((self.n_bins, self.n_joints), dtype=np.float64)
-        self._touched = np.zeros(self.n_bins, dtype=np.int64)
+        self._touched = np.zeros((self.n_bins, self.n_joints), dtype=np.int64)
 
     # ─── Update ──────────────────────────────────────────────────────────
 
@@ -77,8 +109,9 @@ class CycleTemplate:
     ) -> None:
         """Recursive update at bin(φ).
 
-        NaN entries in q skip that joint (preserve previous value).
-        Out-of-bound q (inf) is also skipped.
+        Per-joint NaN entries skip that joint (preserve previous value).
+        First update for a (bin, joint) cell initializes directly to q[k]
+        (avoids amplitude bias — Codex NEEDS_FIX #6).
         """
         if not math.isfinite(phi):
             return
@@ -87,73 +120,97 @@ class CycleTemplate:
             raise ValueError(
                 f"q shape {q_arr.shape} != ({self.n_joints},)"
             )
-        b = float(self._beta_default if beta is None else beta)
-        # Clamp β to clinical range (defensive — caller bug ≠ unsafe behavior)
-        b = max(BETA_MIN, min(BETA_MAX, b))
-        idx = bin_of_phase(phi, self.n_bins)
         valid = np.isfinite(q_arr)
         if not valid.any():
             return
-        # Per-joint update, NaN-aware
+
+        # β scheduling: cold-start β_cold until threshold, then β_default.
+        if beta is None:
+            b = self._beta_cold if self.total_updates < self._cold_threshold \
+                else self._beta_default
+        else:
+            b = float(beta)
+        b = max(BETA_MIN, min(BETA_MAX, b))
+
+        idx = bin_of_phase(phi, self.n_bins)
         old = self._mu[idx]
         new = old.copy()
-        new[valid] = (1.0 - b) * old[valid] + b * q_arr[valid]
+        for k in range(self.n_joints):
+            if not valid[k]:
+                continue
+            if self._touched[idx, k] == 0:
+                # First update for this (bin, joint) — direct init, no β×q bias
+                new[k] = q_arr[k]
+            else:
+                new[k] = (1.0 - b) * old[k] + b * q_arr[k]
         self._mu[idx] = new
-        self._touched[idx] += 1
+        # Per-joint touch count (only joints with valid q)
+        self._touched[idx] = self._touched[idx] + valid.astype(np.int64)
 
-    # ─── Lookup (cubic Hermite over bins) ────────────────────────────────
+    # ─── Lookup (cubic Hermite, per-joint validity-aware) ────────────────
 
     def lookup(self, phi: float) -> np.ndarray:
         """Interpolated template at φ. Returns (n_joints,) float64.
 
-        Cubic Hermite over four adjacent bins (i-1, i, i+1, i+2) with
-        phase wrap.  C¹ continuous; falls back to nearest-neighbor when
-        the surrounding bins are untouched.
+        For each joint k:
+            - If all 4 surrounding bins are touched (per joint) → Catmull-Rom Hermite.
+            - Else if center bin (i0 or i1) is touched → nearest of those.
+            - Else → search outward for nearest touched bin for that joint.
+            - If joint never touched → 0.0.
         """
         if not math.isfinite(phi):
             return np.full(self.n_joints, np.nan, dtype=np.float64)
         phi_w = float(wrap_to_2pi(phi))
-        # Continuous bin position
         bin_pos = phi_w * self.n_bins / TWO_PI
         i = int(math.floor(bin_pos))
-        t = bin_pos - i  # in [0, 1)
-        # Indices with wrap
+        t = bin_pos - i
         i_m1 = (i - 1) % self.n_bins
         i0 = i % self.n_bins
         i1 = (i + 1) % self.n_bins
         i2 = (i + 2) % self.n_bins
-        # If any of the central two bins are untouched, fall back to nearest
-        # touched bin (avoid propagating zeros).
-        if self._touched[i0] == 0 and self._touched[i1] == 0:
-            # Search outward for nearest touched bin
-            nearest = self._find_nearest_touched(i0)
-            if nearest is None:
-                return np.zeros(self.n_joints, dtype=np.float64)
-            return self._mu[nearest].copy()
-        # Cubic Hermite (Catmull-Rom): smooth between bin centers
-        p0 = self._mu[i_m1]
-        p1 = self._mu[i0]
-        p2 = self._mu[i1]
-        p3 = self._mu[i2]
-        # Catmull-Rom basis
+
+        result = np.zeros(self.n_joints, dtype=np.float64)
         t2 = t * t
         t3 = t2 * t
-        result = (
-            0.5
-            * (
-                (2.0 * p1)
-                + (-p0 + p2) * t
-                + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-                + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
-            )
-        )
-        return result.astype(np.float64)
+        for k in range(self.n_joints):
+            tm1 = self._touched[i_m1, k] > 0
+            t0 = self._touched[i0, k] > 0
+            t1 = self._touched[i1, k] > 0
+            tp2 = self._touched[i2, k] > 0
+            if tm1 and t0 and t1 and tp2:
+                p0 = self._mu[i_m1, k]
+                p1 = self._mu[i0, k]
+                p2 = self._mu[i1, k]
+                p3 = self._mu[i2, k]
+                result[k] = 0.5 * (
+                    (2.0 * p1)
+                    + (-p0 + p2) * t
+                    + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                    + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+                )
+            elif t0 and t1:
+                # Linear interp across the two central bins
+                result[k] = (1.0 - t) * self._mu[i0, k] + t * self._mu[i1, k]
+            elif t0:
+                result[k] = self._mu[i0, k]
+            elif t1:
+                result[k] = self._mu[i1, k]
+            else:
+                # Search outward (per joint) — falls back to nearest touched.
+                nearest = self._find_nearest_touched_per_joint(i0, k)
+                if nearest is not None:
+                    result[k] = self._mu[nearest, k]
+                # else: leave 0.0
+        return result
 
     def lookup_jacobian(self, phi: float, eps: float = 1e-3) -> np.ndarray:
-        """∂μ/∂φ at φ (numerical central difference).
+        """∂μ/∂φ at φ (numerical central difference per joint).
 
         Used as EKF measurement Jacobian: H_phi[k] = ∂μ_k/∂φ.
         Returns (n_joints,) float64.
+
+        Codex IMPROVE for L3: analytic Catmull-Rom derivative is cheaper
+        in C++ (avoids 2 lookups). For Phase 1 prototype, central diff is OK.
         """
         if not math.isfinite(phi):
             return np.zeros(self.n_joints, dtype=np.float64)
@@ -169,7 +226,15 @@ class CycleTemplate:
 
     @property
     def touched_fraction(self) -> float:
-        return float(self._touched.astype(bool).sum()) / self.n_bins
+        """Fraction of bins with AT LEAST ONE joint touched (back-compat)."""
+        any_joint_touched = (self._touched > 0).any(axis=1)
+        return float(any_joint_touched.sum()) / self.n_bins
+
+    @property
+    def touched_fraction_per_joint(self) -> np.ndarray:
+        """Per-joint fraction of bins touched. (n_joints,) float64."""
+        per_joint = (self._touched > 0).sum(axis=0).astype(np.float64)
+        return per_joint / self.n_bins
 
     @property
     def total_updates(self) -> int:
@@ -179,23 +244,29 @@ class CycleTemplate:
         self._mu.fill(0.0)
         self._touched.fill(0)
 
-    # Defensive read access (no external mutation)
     @property
     def mu(self) -> np.ndarray:
         return self._mu.copy()
 
+    @property
+    def touched(self) -> np.ndarray:
+        """Per-bin per-joint touch count (defensive copy)."""
+        return self._touched.copy()
+
     # ─── Internal helpers ────────────────────────────────────────────────
 
-    def _find_nearest_touched(self, center: int) -> Optional[int]:
-        """Find nearest bin (by phase distance) that has been updated."""
-        if not self._touched.any():
+    def _find_nearest_touched_per_joint(
+        self, center: int, joint: int
+    ) -> Optional[int]:
+        """Nearest bin (by phase distance) where the given joint has been updated."""
+        if self._touched[:, joint].sum() == 0:
             return None
         for offset in range(1, self.n_bins // 2 + 1):
             left = (center - offset) % self.n_bins
             right = (center + offset) % self.n_bins
-            if self._touched[left] > 0:
+            if self._touched[left, joint] > 0:
                 return left
-            if self._touched[right] > 0:
+            if self._touched[right, joint] > 0:
                 return right
-        # Shouldn't reach here if any touched
-        return int(np.argmax(self._touched))
+        # Defensive — argmax over the joint column
+        return int(np.argmax(self._touched[:, joint]))

@@ -50,14 +50,29 @@ def test_template_init_invalid_beta():
 # ─── Update ──────────────────────────────────────────────────────────────
 
 
-def test_template_update_single_bin():
-    """Update at φ=0 with β=0.10 → bin[0] = 0.10 × q."""
+def test_template_update_first_init_direct_to_q():
+    """Codex NEEDS_FIX #6: first update for (bin, joint) initializes
+    directly to q[k] — NOT β × q[k] (which would bias amplitude low).
+    """
     t = CycleTemplate(beta_default=0.10)
     q = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
     t.update(0.0, q)
-    assert np.allclose(t.mu[0], 0.10 * q)
+    # First update → bin[0] = q (full amplitude, no 0.10× attenuation)
+    assert np.allclose(t.mu[0], q)
     assert t.is_initialized
-    assert t.total_updates == 1
+    assert t.total_updates == 6  # 6 joints touched (per-joint per-bin)
+
+
+def test_template_second_update_uses_beta():
+    """Subsequent updates use the recursive (1-β)*old + β*new rule."""
+    t = CycleTemplate(beta_default=0.10)
+    q1 = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+    q2 = np.array([3.0, 3.0, 3.0, 3.0, 3.0, 3.0])
+    t.update(0.0, q1)
+    # After first: μ[0] = q1 = 1.0
+    t.update(0.0, q2)
+    # After second: μ[0] = 0.9 × 1.0 + 0.10 × 3.0 = 1.2
+    assert np.allclose(t.mu[0], 1.2)
 
 
 def test_template_update_recursive_convergence():
@@ -103,17 +118,100 @@ def test_template_update_all_nan_q_no_change():
 
 
 def test_template_beta_clamped_to_clinical():
-    """β outside [0.03, 0.10] is clamped (defensive)."""
+    """β outside [0.03, 0.10] is clamped (defensive).
+
+    First update is direct-init regardless of β (Codex NEEDS_FIX #6).
+    Test β clamping on the SECOND update where (1-β)*old + β*new is used.
+    """
     t = CycleTemplate(beta_default=0.05)
-    q = np.array([1.0] * 6)
-    # Try β=0.5 (too high) — should clamp to BETA_MAX
-    t.update(0.0, q, beta=0.5)
+    q1 = np.zeros(6)
+    q2 = np.ones(6)
+    # First update: direct init to q1 = 0
+    t.update(0.0, q1, beta=0.5)
     idx = bin_of_phase(0.0, 128)
-    assert np.allclose(t.mu[idx], BETA_MAX * q)
-    # Try β=0.0 (too low) — should clamp to BETA_MIN
+    assert np.allclose(t.mu[idx], q1)
+    # Second update with β=0.5 (clamped to BETA_MAX=0.10): (1-0.10)*0 + 0.10*1 = 0.10
+    t.update(0.0, q2, beta=0.5)
+    assert np.allclose(t.mu[idx], BETA_MAX * q2)
+    # Reset and try β=0.0 → clamped to BETA_MIN
     t.reset()
-    t.update(0.0, q, beta=0.0)
-    assert np.allclose(t.mu[idx], BETA_MIN * q)
+    t.update(0.0, q1, beta=0.0)
+    t.update(0.0, q2, beta=0.0)
+    assert np.allclose(t.mu[idx], BETA_MIN * q2)
+
+
+def test_template_per_joint_touched_tracking():
+    """Codex NEEDS_FIX #5: per-bin per-joint touch counts, not per-bin only."""
+    t = CycleTemplate(beta_default=0.10)
+    # Update only joint 0
+    q = np.array([1.0, float("nan"), float("nan"), float("nan"), float("nan"), float("nan")])
+    t.update(0.5, q)
+    idx = bin_of_phase(0.5, 128)
+    touched = t.touched
+    assert touched[idx, 0] == 1, "Joint 0 should be touched"
+    assert touched[idx, 1] == 0, "Joint 1 should be untouched"
+    # Joint-specific access on later updates
+    q2 = np.array([float("nan"), 2.0, float("nan"), float("nan"), float("nan"), float("nan")])
+    t.update(0.5, q2)
+    touched = t.touched
+    assert touched[idx, 0] == 1
+    assert touched[idx, 1] == 1
+    # Per-joint touched_fraction reflects independent visibility
+    pjf = t.touched_fraction_per_joint
+    assert pjf[0] == 1.0 / 128
+    assert pjf[1] == 1.0 / 128
+    assert pjf[2] == 0.0
+
+
+def test_template_per_joint_lookup_handles_sparse():
+    """When only joint 0 has been touched across many bins, lookup() should
+    return joint-0 values via interpolation/nearest, and 0 for never-touched joints."""
+    t = CycleTemplate(beta_default=0.10)
+    # Train only joint 0 across many bins (rest NaN)
+    for bin_i in range(128):
+        phi = bin_i * TWO_PI / 128
+        q = np.full(6, float("nan"))
+        q[0] = math.sin(phi)
+        # Saturate
+        for _ in range(20):
+            t.update(phi, q)
+    result = t.lookup(1.0)
+    # Joint 0 should reflect sin(1.0) ≈ 0.84
+    assert abs(result[0] - math.sin(1.0)) < 0.1
+    # Joints 1-5 untouched → 0.0
+    assert np.allclose(result[1:], 0.0)
+
+
+def test_template_beta_scheduling_cold_vs_steady():
+    """β scheduling: total_updates < threshold → β_cold, else → β_default."""
+    n_bins = 128
+    n_joints = 6
+    cold = 100
+    t = CycleTemplate(
+        n_bins=n_bins,
+        n_joints=n_joints,
+        beta_default=0.03,
+        beta_cold=0.10,
+        cold_threshold=cold,
+    )
+    # First update (direct init), second update uses β_cold (=0.10)
+    q1 = np.zeros(6)
+    q2 = np.ones(6)
+    t.update(0.0, q1)
+    t.update(0.0, q2)
+    # Cold β = 0.10 → result = 0.10
+    assert np.allclose(t.mu[0], 0.10)
+    # Push total_updates above threshold by saturating other bins
+    for bin_i in range(1, n_bins):
+        phi = bin_i * TWO_PI / n_bins
+        t.update(phi, q1)   # 6 touches per bin
+    # Now total_updates >> cold_threshold
+    assert t.total_updates > cold
+    # Next update at bin 0 should use β_default (=0.03)
+    t.update(0.0, q2)
+    # μ[0] was 0.10, now (1-0.03)*0.10 + 0.03*1 = 0.097 + 0.03 = 0.127
+    expected = (1.0 - 0.03) * 0.10 + 0.03 * 1.0
+    assert np.allclose(t.mu[0], expected, atol=1e-9)
 
 
 # ─── Lookup (cubic Hermite) ──────────────────────────────────────────────
