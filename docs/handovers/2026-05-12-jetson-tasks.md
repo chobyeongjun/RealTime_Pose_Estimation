@@ -23,10 +23,28 @@ git log --oneline -3
 
 ## Step 1 — Phase 1.5 Jetson 환경 검증 (~30분)
 
+### 1A. pytest version 확인 + 의무 upgrade
+
+Jetson 의 system pytest 6.2.5 가 anyio plugin (pytest 7+ 요구) 와 충돌:
+```
+ModuleNotFoundError: No module named '_pytest.scope'
+```
+
 ```bash
 # Jetson 에서
+python3 -m pytest --version
+# pytest 6.x → upgrade 의무
+pip3 install --user --upgrade "pytest>=7"
+# 또는 (간단): anyio 의 pytest plugin disable (verify script 가 이미 -p no:anyio 적용)
+```
+
+### 1B. verify 실행
+
+```bash
 cd ~/realtime-vision-control
+git pull origin local_backup    # verify script fix 의무
 bash scripts/jetson_phase15_verify.sh 2>&1 | tee /tmp/phase15_verify.log
+echo "exit=$?"
 ```
 
 **기대 결과** (모두 PASS):
@@ -41,6 +59,18 @@ bash scripts/jetson_phase15_verify.sh 2>&1 | tee /tmp/phase15_verify.log
 - test 실패 → log 전체 paste
 
 **paste to Mac**: `/tmp/phase15_verify.log` 의 마지막 30 lines.
+
+---
+
+## ⚠ Step 2 의 walking 의무 사항 (2026-05-12 update)
+
+**진정 답**: 지금 의무 X. *5분 짜리 task* — 언제든 가능.
+- Phase 2 (Mac) implementation 이 *parallel critical path*
+- Real-data 검증 = *나중 시간 될 때* 5분 (학생/동료 도움 OK)
+- 지금 Step 1 (verify) 만 완료 → Mac 의 Phase 2 진행
+
+**선택 1**: Walking session 진행 (5분, 정확한 baseline)
+**선택 2** (추천 지금): Step 5 (Track A 30분 benchmark) 만 진행, Step 2-4 defer
 
 ---
 

@@ -12,6 +12,8 @@
 #   ✓ smoke run prints all 6 module imports OK
 
 set +e
+set -o pipefail   # ★ critical: 'cmd | tail -N' 의 \$? 가 tail (0) 아닌 cmd 의 RC.
+                  #   이거 없으면 pytest 실패해도 RC=0 → silent pass.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 GREEN='\033[0;32m'
@@ -62,14 +64,18 @@ print('  ✓ all 12 symbols imported')
 # ─── 4. 126 unit tests ──────────────────────────────────────────────────
 echo ""
 echo "── 4. 126 Plan D Phase 1.5 unit tests ──"
+
+# pytest 6 + anyio plugin 충돌 회피: -p no:anyio (Jetson 환경 fix).
+# 또한 pipefail (script 상단 설정) 로 cmd 실패 시 RC 정확 propagate.
 PYTHONPATH=src python3 -m pytest \
+    -p no:anyio -p no:asyncio \
     tests/test_plan_d_utils.py \
     tests/test_plan_d_l1.py \
     tests/test_plan_d_cycle_template.py \
     tests/test_plan_d_phase_estimator.py \
     tests/test_plan_d_hilbert_phase.py \
     tests/test_plan_d_cold_start_integration.py \
-    -q 2>&1 | tail -10
+    -q 2>&1 | tail -15
 
 RC=$?
 echo ""
