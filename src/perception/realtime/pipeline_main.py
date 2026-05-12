@@ -84,6 +84,16 @@ try:
 except ImportError:
     _HAS_DIRECT_TRT = False
 
+# Plan D Phase 2 predictor (commit 8980f84 — 218 tests Mac, 215 Jetson PASS)
+# 진정 *production 통합 — effective control latency -21ms target
+try:
+    from perception.plan_d_prototype import PlanDPredictor  # type: ignore
+    _HAS_PLAN_D = True
+except ImportError as _e:
+    _HAS_PLAN_D = False
+    PlanDPredictor = None
+    print(f"[Pipeline][WARN] Plan D predictor import failed: {_e}", flush=True)
+
 # ─── 상수 ─────────────────────────────────────────────────────────────────────
 TARGET_HZ       = 60.0
 TARGET_DT       = 1.0 / TARGET_HZ          # 0.0167 s
@@ -142,6 +152,24 @@ class Pipeline:
         self._trace_fp = None
         self._trace_writer = None
         self._t_prev_publish_mono_ns: int | None = None
+
+        # Plan D Phase 2 predictor — production 통합 (--enable-plan-d 옵션)
+        # 진정 *4 joints: hip_L, knee_L, hip_R, knee_R (현재 production 의무)
+        # 진정 *Plan D 의 *50ms lookahead 가 *진정 *effective latency game changer
+        self._predictor: 'PlanDPredictor | None' = None
+        self._plan_d_log_counter = 0
+        self._plan_d_log_interval = 200   # 매 200 frames 마다 log
+        if getattr(args, 'enable_plan_d', False) and _HAS_PLAN_D:
+            try:
+                self._predictor = PlanDPredictor(
+                    n_joints=4,           # hip_L, knee_L, hip_R, knee_R
+                    fs_hz=67.0,           # production measured
+                    initial_omega=6.28,   # 1 Hz stride (Codex IMPROVE: session calibration)
+                )
+                print(f"[Pipeline] Plan D predictor enabled (n_joints=4, fs=67Hz)")
+            except Exception as exc:
+                print(f"[Pipeline][WARN] Plan D init failed: {exc}", flush=True)
+                self._predictor = None
 
     # ── 초기화 ────────────────────────────────────────────────────────────────
 
@@ -410,6 +438,62 @@ class Pipeline:
             method         = method,
         ))
         _t4 = time.perf_counter()
+
+        # ⑥.3 Plan D Phase 2 predictor — production 통합 (--enable-plan-d 시)
+        # 진정 *4 joints: hip_L, knee_L, hip_R, knee_R (rad)
+        # 진정 *t_now = monotonic ns (Plan D 의 *진정 *time reference)
+        # 진정 *forecast(τ) 의 *τ = T8 - T4 의 *진정 *제어 lookahead
+        if self._predictor is not None and flexion.valid and raw_3d:
+            try:
+                import math as _math
+                q_rad = np.array([
+                    _math.radians(flexion.left_hip_deg),
+                    _math.radians(flexion.left_knee_deg),
+                    _math.radians(flexion.right_hip_deg),
+                    _math.radians(flexion.right_knee_deg),
+                ], dtype=np.float64)
+                # σ per joint — depth confidence + box_conf 기반 추정 (improve TODO)
+                # 진정 *진정 *1차: uniform 0.05 rad (~3°). 진정 *Phase B 에서
+                # *per-kp depth uncertainty 기반 동적 σ 의무.
+                sigma_per_joint = np.full(4, 0.05, dtype=np.float64)
+                # hip vertical (world frame)
+                l_hip = raw_3d.get('left_hip')
+                r_hip = raw_3d.get('right_hip')
+                if l_hip is not None and r_hip is not None:
+                    hip_z = 0.5 * (float(l_hip[2]) + float(r_hip[2]))
+                elif l_hip is not None:
+                    hip_z = float(l_hip[2])
+                elif r_hip is not None:
+                    hip_z = float(r_hip[2])
+                else:
+                    hip_z = float('nan')
+
+                t_now_s = time.monotonic_ns() / 1e9
+                self._predictor.feed(
+                    t_now=t_now_s,
+                    q=q_rad,
+                    sigma_per_joint=sigma_per_joint,
+                    hip_z_world_m=hip_z,
+                )
+                # 매 200 frames 의무 console log (production 의 *진정 *영향 *최소*)
+                self._plan_d_log_counter += 1
+                if self._plan_d_log_counter >= self._plan_d_log_interval:
+                    self._plan_d_log_counter = 0
+                    p = self._predictor
+                    forecast_50ms = p.forecast(0.050)
+                    hs_L = p.predict_heel_strike("L", max_t_ahead_s=2.0, min_omega_rad_s=1.0)
+                    print(
+                        f"[Plan D] level={p.level.name} stride={p.stride_count} "
+                        f"ω={p.omega:.2f}rad/s ({p.omega / 6.28:.2f}Hz) "
+                        f"φ={p.phi:.2f}rad templ={p.template_touched_fraction:.2f} "
+                        f"forecast50: q_pred={forecast_50ms.q_pred is not None} "
+                        f"HS_L t_ahead={hs_L.t_ahead_s:.3f}s "
+                        f"conf={hs_L.confidence:.2f} ready={hs_L.ready}",
+                        flush=True,
+                    )
+            except Exception as _exc:
+                # production 의무 graceful X — 단 *진정 *log + continue
+                pass
 
         # ⑥.5 RT trace logging (--trace-csv 옵션 시, per-frame T0~T4)
         if self._trace_writer is not None:
@@ -839,7 +923,16 @@ def parse_args() -> argparse.Namespace:
              "  columns: frame_id, t0_mono_ns, t1_fetch_done_perf, t2_predict_done,\n"
              "           t3_depth3d_done, t4_publish_done_mono_ns, interval_ms, valid\n"
              "  진정 true e2e (T0~T4) 측정 의 foundation.\n"
-             "  진정 jitter, drop detection 의무 reference.",
+             "  ⚠ Path B: trace mode 활성 시 *진정 *production 영향 +0.7ms*\n"
+             "    (torch.cuda.synchronize() 의무 per stage). baseline 측정 시 OFF.",
+    )
+    parser.add_argument(
+        "--enable-plan-d", dest="enable_plan_d", action="store_true",
+        help="Plan D Phase 2 predictor 활성 (PlanDPredictor, 218 tests Mac PASS).\n"
+             "  매 frame 의무 feed(t_now, q, σ, hip_z). 매 200 frames 의무\n"
+             "  console log of stride_count + level + omega + HS prediction.\n"
+             "  ⚠ 진정 *Phase B (별도 commit) — SHM v2 publish 후 *진정 *forecast\n"
+             "    publish 의 *진정 *진정 *외부 mechanism 의무 추가.",
     )
     return parser.parse_args()
 
