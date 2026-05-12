@@ -180,9 +180,35 @@
 |---|---|
 | ZED SDK concurrent retrieve 의 진짜 contract | Stereolabs forum 또는 source code (closed) |
 | Triton on Jetson aarch64 — wheel 가능성 | future PyTorch release |
-| V4L2 의 ZED X 의 정확 raw format | Jetson 의 `v4l2-ctl --list-formats-ext` 측정 |
+| ~~V4L2 의 ZED X 의 정확 raw format~~ | **★ 2026-05-12: Bayer RAW10 (BA10) 확정 — production abandon** |
 | ARM Orin 의 cross-process atomic 의 정확 ordering | clinical 직전 의무 audit (C++ binding 또는 inline asm) |
 | Plan D EKF 의 phase template 의 *clinical patient* 의 cycle 깨짐 | Week 4-5 stress test |
+
+---
+
+## 8. New Learning — V4L2 Bayer 발견 (2026-05-12)
+
+### 8.1 ZED X (tegra-capture-vi) = Bayer RAW10 만 (NV12 X)
+- **증상**: `v4l2-ctl --list-formats-ext /dev/video0` → 'BA10' (10-bit Bayer GRGR/BGBG) 만 노출.
+- **원인**: ZED X Mini 의 sensor 가 Bayer raw. tegra-capture-vi (Jetson V4L2) 가 raw 전달.
+  NV12 path = Argus/ISP 거쳐야. *bare V4L2* 에선 raw bayer 만.
+- **함의**: V4L2 production 우회 = debayer + rectify + stereo (4-8주). 4-6주 budget X.
+- **해결**: V4L2 production **abandon**. ZED SDK 그대로 + Plan D EKF 가 진정 path.
+- **Lesson**: libargus / VPI / gstreamer 설치 됐다고 *NV12 path 보장 X*. raw sensor format = 사용자 측 *empirically 검증* 의무.
+
+### 8.2 Raw vs Rectified calibration 의 차이 (Codex 권유 적중)
+- ZED SDK 의 `calibration_parameters` = rectified (이미 distortion 적용 후, disto 모두 0).
+- `calibration_parameters_raw` = real distortion coeffs.
+  - left fx: 367.35 (raw) vs 362.26 (rectified)
+  - left disto[0..6]: 0.0428, 0.0277, -7.5e-5, -2.2e-4, -4.9e-3, 0.055 (raw)
+- V4L2 raw 사용 시 **raw distortion 의무**. ZED SDK 거치면 자동 적용.
+- **Lesson**: ZED `calibration_parameters` 의 *rectified vs raw* 구분. V4L2 path 시 raw 의무.
+
+### 8.3 Empirical kill-test 의 가치
+- Codex Q4 prediction: "Bayer RAW10/RAW12 가 NV12/YUYV 보다 likely"
+- 실제 측정 (kill-test, 5초): Bayer RAW10 확정
+- → *추측 으로 4-8주 implement 시도 X*. *empirical check 후 결정* 의무.
+- **Lesson**: Codex 가 *prior art evidence* 로 prediction 가능. empirical kill-test = budget 절감의 핵심.
 
 ---
 

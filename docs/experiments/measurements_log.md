@@ -634,8 +634,91 @@ Codex Q3 권유:
 3. **(사용자 control repo)** SHM v2 reader skeleton 작성 시작 (cpp_shm_v2_reader_skeleton.md)
 
 ### ABANDONED (Codex 권유)
-- V4L2 production implementation (clinical block 시 drop, kill-test 만)
+- ~~V4L2 production~~ → **★ 2026-05-12 18:55 Jetson check 결과 = Bayer raw, ABANDONED**
 - src/perception/CUDA_Stream/tests/test_shm_publisher.py 옛 v1 test (cleanup 의무 — 다음 turn)
+
+---
+
+## 2026-05-12 18:55 — V4L2 capability check ★ ABANDONED (Codex Q4 예측 적중)
+
+### Setup (Jetson, commit af49c36)
+- `check_v4l2_capability.sh` 실행
+- 환경: JetPack 6.2 R36.4.7, ZED SDK 5.2.1, libargus + VPI 3.2.4
+
+### V4L2 format (★ critical finding)
+
+```
+/dev/video0 + /dev/video1 (zedx 10-0020):
+  'BA10' (10-bit Bayer GRGR/BGBG)
+   1920x1200 @ 30/60fps
+   960x600   @ 60/120fps   ← SVGA path (우리 production 동일 fps)
+   1920x1080 @ 30/60fps
+```
+
+**NV12 / YUYV 미가용**. *오직 Bayer RAW10*.
+
+### Codex Q4 prediction vs result
+
+Codex (bzc20un44, 2026-05-12):
+> "Expected /dev/video* on tegra-capture-vi is more likely Bayer RAW10/RAW12 than NV12/YUYV.
+>  If Bayer only, **this is 4-8 weeks for clinical-grade stereo**."
+
+→ **예측 정확**. Bayer RAW10 = 4-8주 effort:
+- Debayer (Bayer → RGB) 의 CUDA kernel 또는 VPI
+- Rectify (raw distortion → undistorted)
+- L/R sync 의무
+- Stereo (Census + L/R + subpixel)
+- Total = 4-8주 → **clinical 4-6주 budget X**
+
+### Raw vs rectified calib 검증 (Codex 권유 적중)
+
+| | Rectified (SDK API) | Raw (V4L2 path) |
+|---|---|---|
+| fx | 362.26 | **367.35** |
+| cx | 489.45 | **488.20** |
+| disto[0] | 0 | 0.0428 |
+| disto[1] | 0 | 0.0277 |
+| disto[2..5] | 0 | -7.5e-5, -2.2e-4, -4.9e-3, 0.055 |
+
+→ Rectified = SDK 가 이미 적용 (disto 모두 0). Raw = **real distortion coeffs**.
+→ V4L2 raw 사용 시 raw distortion 의무.
+→ 우리 quality_dataset_io 의 disto length 4..12 허용 fix 정확.
+
+### libargus + VPI 가용 ✓
+- libnvargus.so, libnvargus_socketclient.so, libnvargus_socketserver.so 모두 가용
+- gst-launch-1.0 가용
+- VPI 3.2.4 + nvidia-vpi 6.2.1+b38 + python3.10-vpi3 설치
+
+→ NV12 path 면 *2-3주 가능* 였음. 단 **Bayer 만** = abandon.
+
+### Conclusion: V4L2 ★ PRODUCTION ABANDONED
+
+Codex Q8 final synthesis:
+> "Optimal Week 1: pose batch = main vision task, C++ SHM v2 reader contract immediately,
+>  bounded V4L2 kill-test in parallel. **If time slips, kill V4L2 without debate.**"
+
+Kill-test result: **Bayer only → 4-8주 → budget X → DROP**.
+
+진정 Vision repo (제) 의 Week 1 priority 정정:
+| Track | Status | Effort |
+|---|---|---|
+| **A) Pose batch** (production pipeline single-frame mode) | **진정 main** | 1-2일 |
+| **C) C++ SHM v2 reader** (사용자 control repo) | 사용자 작업, skeleton 제공 끝 | 사용자 의무 |
+| ~~B) V4L2 production~~ | **ABANDONED** | (Bayer raw 4-8주, budget X) |
+
+V4L2 skeleton (sparse_stereo_kernel.py, check_v4l2_capability.sh) = **학습 + 영구 기록 가치**.
+*production effort 안 함* (Codex 일관 권유 적중).
+
+### Mac + Jetson verify (동일 PASS)
+- verify_shm_v2.py: ALL PASS (Mac + Jetson)
+- verify_quality_dataset.py: ALL PASS (Mac + Jetson)
+- batch_pose_compute --self-test: mask=0b111111 PASS
+
+### Lessons (session_errors_and_learnings.md 추가 entry)
+- **ZED X (tegra-capture-vi) = Bayer RAW10 만** (NV12 X)
+- libargus / VPI 설치 됐다고 NV12 path 보장 X — *raw sensor format* 의 의무
+- Codex 의 *prior art prediction* (Bayer 가 더 likely) 정확
+- Empirical check 후 abandon 결정 = engineering 정직
 
 ---
 
