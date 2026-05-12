@@ -559,6 +559,86 @@ Master plan progress:
 
 ---
 
+## 2026-05-12 — Week 1 Day 1: V4L2 prototype skeleton + pose batch + 사용자 의지 (모두 implement)
+
+### 사용자 의지
+"모두 다 진행 (V4L2 우회까지)", "Jetson 테스트 적으니 모두 implement", "오류 영구 기록".
+
+### 작성 file (Mac 까지 작성 + 일부 PASS)
+
+1. **docs/lessons/session_errors_and_learnings.md** (~220 line)
+   - 13 errors + learnings 영구 기록
+   - SSH user mismatch, PYTHONPATH 누락, ZED disto 12-element, atomic write npz,
+     Python logging buffer, $? vs PIPESTATUS, anyio plugin, ZED thread-safety,
+     CPU affinity = noise, 진정 Codex outside value 등
+
+2. **scripts/batch_pose_compute.py** (~340 line)
+   - Offline YOLO TRT on dumped npz → pose attach (Codex Q3 권유: new posed dir, raw 보존)
+   - Mac self-test PASS (synthetic frame 의 round-trip + valid_mask derive)
+   - Jetson: skeleton — production pipeline 의 single-frame mode 의무
+
+3. **scripts/check_v4l2_capability.sh** (~70 line)
+   - V4L2 의 ZED X 의 format 검증 (NV12 vs Bayer)
+   - calibration_parameters_raw 추출 검증
+   - libargus + VPI 가용 확인
+
+4. **src/perception/CUDA_Stream/sparse_stereo_kernel.py** (~250 line)
+   - PyTorch reference (SAD + L/R consistency + parabola subpixel)
+   - disparity_to_depth + depth_uncertainty_sigma (Plan D measurement R source)
+   - Jetson only (torch 의무)
+
+5. **docs/lessons/cpp_shm_v2_reader_skeleton.md** (~270 line)
+   - 사용자 control repo 의 prereq
+   - C++ #pragma pack header + offset helper + seqlock reader
+   - Plan D EKF integration sample
+
+### Codex review 6번째 (bzc20un44, token 2.94M) brutal honest
+
+**P1 발견**:
+1. Watchdog `valid=False + valid_reason=VALID_OK default` 모순 → shm_publisher 의 invariant guard
+2. Docs schema drift (quality_dataset_format / consumer_contract / 옛 test_shm_publisher)
+3. ARM memory ordering (clinical 직전 의무, prior fix 의 docstring 만)
+4. latency log wording (clinical = "Plan D 의 over-budget frame 안전 처리" 더 정확)
+
+**Q3 batch pose 권유**: in-place X, **new posed dir (raw 보존)**.
+
+**Q6 진정 priority**: **A pose batch → C C++ reader > B V4L2 kill-test**. V4L2 = bounded kill-test, drop if blocks.
+
+**Q8 Final synthesis**:
+> "Optimal Week 1: pose batch = main vision task, C++ SHM v2 reader contract immediately, bounded V4L2 kill-test in parallel. Vision repo owns: posed quality datasets, covariance/validity honesty, V4L2 falsification. Control repo owns: SHM reader integration, age/valid/estop policy, Plan D L1/L2, then L3. **If time slips, kill V4L2 without debate.**"
+
+### Fix 적용 (commit 다음)
+
+P1-1 (Watchdog reason 모순):
+- shm_publisher.py: invariant guard added.
+  `if not valid and valid_reason == VALID_OK: valid_reason = INVALID_UNKNOWN`
+
+P1-2 (Docs drift):
+- quality_dataset_format.md: ts_domain + valid 의 table 추가
+
+Codex Q3 권유:
+- batch_pose_compute.py: `--output-dir` (default = `<input-dir>_pose`).
+  raw 보존, session_calib.json 도 posed dir 에 복사.
+
+### Mac verify (post-fix)
+- verify_shm_v2.py: ALL PASS (8 sections)
+- verify_quality_dataset.py: ALL PASS (8 sections)
+- batch_pose_compute.py --self-test: PASS
+
+### Codex consult 총 tokens
+- 6회 cumulative: ~7.0M tokens (4.1M prior + 2.94M bzc20un44)
+
+### NEXT (Jetson 측정 의무)
+1. **check_v4l2_capability.sh** 실행 → V4L2 format 결정 (NV12 / Bayer)
+2. **batch_pose_compute.py** 실행 → posed dir 생성 + production pose 와 RMSE 비교
+3. **(사용자 control repo)** SHM v2 reader skeleton 작성 시작 (cpp_shm_v2_reader_skeleton.md)
+
+### ABANDONED (Codex 권유)
+- V4L2 production implementation (clinical block 시 drop, kill-test 만)
+- src/perception/CUDA_Stream/tests/test_shm_publisher.py 옛 v1 test (cleanup 의무 — 다음 turn)
+
+---
+
 ## 2026-05-10 19:05–19:16 — CPU Affinity 8-case Ablation (commit `04550b3`)
 
 ### Setup

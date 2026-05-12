@@ -336,6 +336,13 @@ class ShmPublisher:
             valid = False
             valid_reason = INVALID_OCCLUDED
 
+        # ★ Codex review bzc20un44 P1-1 fix: valid=False + valid_reason=VALID_OK 모순.
+        # Watchdog 등 caller 가 valid=False 단 valid_reason 미명시 시 default = VALID_OK.
+        # → reader 가 invalid frame 을 OK 로 오해 가능 (clinical silent failure).
+        # Fix: invariant — valid=False 시 valid_reason 가 OK 면 강제 INVALID_UNKNOWN.
+        if not valid and valid_reason == VALID_OK:
+            valid_reason = INVALID_UNKNOWN
+
         # kp_sigma_m default — uniform 15mm
         if kp_sigma_m is None:
             kp_sigma_m = np.full((K, 3), DEFAULT_SIGMA_M, dtype=np.float32)

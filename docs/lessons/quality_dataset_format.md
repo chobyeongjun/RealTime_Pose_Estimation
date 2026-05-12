@@ -34,6 +34,8 @@ Recorded session 의 *raw RGB + depth + pose + calib + timestamps + per-kp valid
 | `publish_done_mono_ns` | uint64 | () | CLOCK_MONOTONIC post pipeline |
 | `valid_mask_bits` | uint64 | () | per-kp validity bits |
 | `valid_reason` | uint8 | () | VALID_REASON_* enum |
+| `ts_domain` | uint8 | () | ★ Codex bzc20un44 fix: timestamp domain (0=CLOCK_REALTIME) |
+| `valid` | bool | () | ★ Codex bzc20un44 fix: SHM v2 valid_flag (derived from mask) |
 | `world_frame_applied` | bool | () | 0=camera, 1=IMU world-rotated |
 | `box_conf` | float32 | () | detection confidence |
 | `depth_invalid_ratio` | float32 | () | NaN/0 픽셀 비율 |
