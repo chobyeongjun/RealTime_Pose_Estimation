@@ -83,6 +83,12 @@ fi
 echo -e "  ${GREEN}✓ SVO recorded: $(ls -lh "$SVO_PATH" | awk '{print $5}')${NC}"
 echo ""
 
+# Let ZED SDK release camera device handles before Phase 3 opens the same SDK
+# again for SVO replay. Without this, Phase 3 occasionally stalls at 1Hz.
+echo "  Releasing ZED camera lock (5s)..."
+sleep 5
+echo ""
+
 # ─── Phase 3: Pipeline replay + dumps ───────────────────────────────────
 echo "── Phase 3: Pipeline replay + pose npz dump + trace CSV + Plan D ──"
 PYTHONPATH=src:src/perception/benchmarks timeout $((DURATION_S + 30)) \
