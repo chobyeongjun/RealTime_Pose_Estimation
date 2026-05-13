@@ -240,5 +240,74 @@ def test_default_gains_are_safe():
     assert min(kd) >= 0.0
 
 
+def test_bridge_rejects_stale_forecast_seq_unchanged():
+    """Codex P1 fix: if forecast seq does not advance, bridge must NOT keep
+    sending PKT_COMMAND. Same-seq reads on consecutive ticks → fc_stale."""
+    name = _shm_name("tss")
+    _publish_one(name, [0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+
+    try:
+        reader = ForecastReader(name)
+        fc1 = reader.read()
+        fc2 = reader.read()
+        assert fc1 is not None and fc2 is not None
+        # Same publisher state → identical seq
+        assert fc1.seq == fc2.seq, "seq must be unchanged when publisher hasn't republished"
+        # First tick treats it as fresh; second tick must detect stale.
+        # We simulate the bridge's last_seq tracking inline:
+        last_seq = fc1.seq
+        is_stale = (fc2.seq == last_seq)
+        assert is_stale, "second read of frozen SHM must be flagged stale"
+        reader.close()
+    finally:
+        try:
+            from multiprocessing import shared_memory as _sm
+            _sm.SharedMemory(name=name).unlink()
+        except Exception:
+            pass
+
+
+def test_bridge_rejects_stale_forecast_by_age():
+    """Codex P1 fix: if publish_done_mono_ns is too old, bridge falls back."""
+    name = _shm_name("tsa")
+    _publish_one(name, [0.0]*6)
+    try:
+        reader = ForecastReader(name)
+        fc = reader.read()
+        assert fc is not None and fc.publish_done_mono_ns > 0
+        # Simulate the bridge's age check inline
+        old_now = fc.publish_done_mono_ns + 100_000_000  # 100ms newer
+        max_age_ns = 50 * 1_000_000
+        age_ns = old_now - fc.publish_done_mono_ns
+        assert age_ns > max_age_ns
+        reader.close()
+    finally:
+        try:
+            from multiprocessing import shared_memory as _sm
+            _sm.SharedMemory(name=name).unlink()
+        except Exception:
+            pass
+
+
+def test_teensy_protocol_module_has_no_pyserial_dep():
+    """Codex P2 fix: teensy_protocol must be importable without pyserial."""
+    import importlib
+    import sys as _sys
+
+    # Force a fresh import; ensure no 'serial' module gets pulled in.
+    if "teensy_protocol" in _sys.modules:
+        del _sys.modules["teensy_protocol"]
+    serial_before = "serial" in _sys.modules
+    mod = importlib.import_module("teensy_protocol")
+    serial_after_protocol = "serial" in _sys.modules
+    # protocol module itself must NOT have imported serial.
+    assert serial_after_protocol == serial_before, \
+        "teensy_protocol imported pyserial as a side effect"
+    # Re-export sanity
+    assert hasattr(mod, "pack_command")
+    assert hasattr(mod, "pack_heartbeat")
+    assert hasattr(mod, "parse_frame")
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

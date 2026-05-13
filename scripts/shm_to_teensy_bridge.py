@@ -29,8 +29,10 @@ from pathlib import Path
 from multiprocessing import shared_memory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from teensy_smoke_test import (  # noqa: E402
-    crc16, pack_command, parse_frame, parse_telemetry,
+# Codex P2 fix: import from teensy_protocol (pyserial-free) instead of
+# teensy_smoke_test (which used to top-level-import serial and sys.exit).
+from teensy_protocol import (  # noqa: E402
+    crc16, pack_command, pack_heartbeat, parse_frame, parse_telemetry,
     PKT_COMMAND, PKT_HEARTBEAT, PKT_STOP, PKT_TELEMETRY,
     MAGIC, VERSION, CLAMP_NAMES,
 )
@@ -180,7 +182,10 @@ class MockSerial:
 def open_serial(port, baud=2000000, mock=False):
     if mock:
         return MockSerial()
-    import serial
+    try:
+        import serial
+    except ImportError:
+        raise RuntimeError("pyserial not installed — run: pip install pyserial")
     return serial.Serial(port, baud, timeout=0.005)
 
 
@@ -206,6 +211,9 @@ def main():
     ap.add_argument("--no-forecast", action="store_true",
                     help="Send heartbeats only (no SHM reader). Useful as Teensy keepalive.")
     ap.add_argument("--shm-name", default=FORECAST_NAME)
+    ap.add_argument("--max-forecast-age-ms", type=float, default=50.0,
+                    help="Stale-forecast threshold: publish_done older than this → fallback. "
+                         "Codex P1 fix: prevents replaying frozen SHM after producer dies.")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -228,10 +236,14 @@ def main():
         "fc_low_cascade": 0,
         "fc_high_sigma": 0,
         "fc_no_data": 0,
+        "fc_stale": 0,           # Codex P1: forecast didn't advance
         "telem_rx_good": 0,
         "telem_rx_bad": 0,
         "clamp_reasons": {},
     }
+    last_seq = None
+    last_pub_done_ns = 0
+    max_age_ns = int(args.max_forecast_age_ms * 1_000_000)
 
     rx_buf = bytearray()
     t0 = time.monotonic()
@@ -260,13 +272,26 @@ def main():
                     else:
                         stats["fc_high_sigma"] += 1
                 else:
-                    q_pred = fc.q_pred[:]
-                    cascade = fc.cascade_level
-                    # Host-side feedforward: keep zero for prototype (Teensy
-                    # ForceClamp handles cable→motor conversion). Real C++ loop
-                    # would compute tau_ff from omega + cycle template.
-                    tau_ff = [0.0] * N_JOINTS
-                    send_cmd = True
+                    # Codex P1 freshness gate: if producer froze, fc.seq /
+                    # fc.publish_done_mono_ns will not advance. We must NOT
+                    # keep sending PKT_COMMAND in that case — let Teensy's
+                    # command watchdog trip.
+                    now_mono_ns = time.monotonic_ns()
+                    seq_unchanged = (last_seq is not None and fc.seq == last_seq)
+                    age_ns = now_mono_ns - fc.publish_done_mono_ns \
+                             if fc.publish_done_mono_ns > 0 else 0
+                    too_old = (age_ns > max_age_ns) if fc.publish_done_mono_ns > 0 else False
+                    if seq_unchanged or too_old:
+                        stats["fc_stale"] += 1
+                    else:
+                        q_pred = fc.q_pred[:]
+                        cascade = fc.cascade_level
+                        # Host-side feedforward: keep zero for prototype.
+                        # Teensy ForceClamp handles cable→motor conversion.
+                        tau_ff = [0.0] * N_JOINTS
+                        send_cmd = True
+                        last_pub_done_ns = fc.publish_done_mono_ns
+                    last_seq = fc.seq
 
             # ── 2. Build + send frame ───────────────────────────────────
             if send_cmd:
@@ -280,9 +305,7 @@ def main():
             else:
                 # Heartbeat keeps Teensy's link watchdog fresh while command
                 # watchdog correctly trips at 200ms → pretension. (Codex P1 fix.)
-                hdr = struct.pack("<BBBBH", MAGIC[0], MAGIC[1], VERSION, PKT_HEARTBEAT, 0)
-                crc = crc16(hdr[3:])
-                ser.write(hdr + struct.pack("<H", crc))
+                ser.write(pack_heartbeat())
                 stats["heartbeats_sent"] += 1
 
             # ── 3. Drain telemetry RX ───────────────────────────────────

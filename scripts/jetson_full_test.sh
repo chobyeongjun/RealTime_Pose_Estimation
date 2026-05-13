@@ -78,9 +78,18 @@ echo ""
 # ─── Phase 2: Performance mode ──────────────────────────────────────────
 note "[2/7] nvpmodel + jetson_clocks"
 PERF_LOG="$LOG_DIR/02_perf.log"
-sudo nvpmodel -m 0 2>&1 | tee "$PERF_LOG" || warn "nvpmodel -m 0 needed sudo"
-sudo jetson_clocks 2>&1 | tee -a "$PERF_LOG" || warn "jetson_clocks needed sudo"
-pass "performance mode applied"
+NVP_OK=0
+CLK_OK=0
+if sudo nvpmodel -m 0 > "$PERF_LOG" 2>&1; then NVP_OK=1; fi
+if sudo jetson_clocks >> "$PERF_LOG" 2>&1; then CLK_OK=1; fi
+
+if [ "$NVP_OK" -eq 1 ] && [ "$CLK_OK" -eq 1 ]; then
+    pass "performance mode applied (nvpmodel + jetson_clocks)"
+elif [ "$NVP_OK" -eq 0 ] && [ "$CLK_OK" -eq 0 ]; then
+    fail "neither nvpmodel nor jetson_clocks succeeded — non-Jetson run? — see $PERF_LOG"
+else
+    fail "partial perf-mode failure (nvp=$NVP_OK clk=$CLK_OK) — see $PERF_LOG"
+fi
 echo ""
 
 # ─── Phase 3: Pipeline boot ─────────────────────────────────────────────
