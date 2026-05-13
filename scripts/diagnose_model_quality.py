@@ -49,7 +49,7 @@ CONF_THRESHOLD = 0.5
 DEPTH_MIN, DEPTH_MAX = 0.1, 3.0
 
 
-def categorize_frame(result, depth_at_kp) -> str:
+def categorize_frame(result, depth_at_kp, conf_thr=None) -> str:
     """Return one of: ok | yolo_no_box | conf_low_kp | depth_nan | depth_oor | triplet_missing
 
     Codex P2: TRTPoseEngine sets detected=True only when ≥3 keypoints have conf>0.3.
@@ -64,8 +64,9 @@ def categorize_frame(result, depth_at_kp) -> str:
     if not confs and not kp2d:
         return "yolo_no_box"
 
-    # which joints pass conf threshold
-    conf_ok = {n for n in JOINT_NAMES_6 if confs.get(n, 0.0) >= CONF_THRESHOLD}
+    # which joints pass conf threshold (overridable via --joint-conf-thresh)
+    thr = CONF_THRESHOLD if conf_thr is None else conf_thr
+    conf_ok = {n for n in JOINT_NAMES_6 if confs.get(n, 0.0) >= thr}
     if len(conf_ok) < 3:
         return "conf_low_kp"
 
@@ -108,6 +109,11 @@ def main():
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--engine", default=None,
                     help="TRT engine path; default = src/perception/models/yolo26s-lower6-v2-640.engine")
+    ap.add_argument("--conf-thresh", type=float, default=0.25,
+                    help="TRT person detection threshold (default 0.25). Lower to "
+                         "0.05 to see if model produces low-conf detections.")
+    ap.add_argument("--joint-conf-thresh", type=float, default=0.5,
+                    help="Per-joint conf threshold for the 'conf_low_kp' bucket (default 0.5).")
     ap.add_argument("--dump-frames", type=int, default=0,
                     help="Save first N processed frames as PNG with keypoints overlaid.")
     args = ap.parse_args()
@@ -163,8 +169,9 @@ def main():
 
     # Load TRT engine — Codex P1: __init__ only stores config, load() creates
     # CUDA context + tensors. Without this, predict() crashes on _input_tensor.
-    model = TRTPoseEngine(engine_path, imgsz=args.imgsz)
+    model = TRTPoseEngine(engine_path, imgsz=args.imgsz, conf=args.conf_thresh)
     model.load()
+    print(f"  conf_thresh: {args.conf_thresh}  joint_conf_thresh: {args.joint_conf_thresh}")
 
     rt = sl.RuntimeParameters()
     img = sl.Mat()
@@ -211,7 +218,7 @@ def main():
                     depth_at_kp[n] = z
                     per_joint_depth[n].append(z)
 
-        cat = categorize_frame(result, depth_at_kp)
+        cat = categorize_frame(result, depth_at_kp, conf_thr=args.joint_conf_thresh)
         categories[cat] += 1
 
         if dumped_frames < args.dump_frames:
