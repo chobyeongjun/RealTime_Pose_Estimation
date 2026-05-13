@@ -100,10 +100,12 @@ note "[3/7] Pipeline boot with --enable-shm-v2 --enable-plan-d"
 PIPELINE_LOG="$LOG_DIR/03_pipeline.log"
 # No external timeout — we manage pipeline lifecycle explicitly so the SHM
 # stays alive through Phase 4 + 5 (dump_shm + bridge mock).
+TRACE_CSV_PATH="$LOG_DIR/03_trace.csv"
 PYTHONPATH=src:src/perception/benchmarks python3 \
     src/perception/realtime/pipeline_main.py \
     --no-display --method B \
     --enable-shm-v2 --enable-plan-d \
+    --trace-csv "$TRACE_CSV_PATH" \
     > "$PIPELINE_LOG" 2>&1 &
 PIPE_PID=$!
 
@@ -171,14 +173,13 @@ note "[6/7] Stop pipeline + analyze trace"
 kill -SIGTERM $PIPE_PID 2>/dev/null || true
 wait $PIPE_PID 2>/dev/null || true
 
-# pipeline_main may have produced a trace CSV — check standard location
-TRACE_CSV=$(find . -maxdepth 4 -name "trace_*.csv" -newer "$LOG_DIR" 2>/dev/null | head -1)
-if [ -n "$TRACE_CSV" ] && [ -x scripts/analyze_trace.py ]; then
+if [ -s "$TRACE_CSV_PATH" ]; then
     ANALYZE_LOG="$LOG_DIR/06_analyze.log"
-    PYTHONPATH=src python3 scripts/analyze_trace.py "$TRACE_CSV" \
-        > "$ANALYZE_LOG" 2>&1 && pass "trace analyzed" || warn "analyze_trace error"
-elif [ -z "$TRACE_CSV" ]; then
-    warn "no trace CSV produced — pipeline_main was run without --trace-csv"
+    PYTHONPATH=src python3 scripts/analyze_trace.py "$TRACE_CSV_PATH" \
+        > "$ANALYZE_LOG" 2>&1 && pass "trace analyzed ($(wc -l < "$TRACE_CSV_PATH") rows)" \
+        || warn "analyze_trace error — see $ANALYZE_LOG"
+else
+    warn "trace CSV empty or missing — $TRACE_CSV_PATH"
 fi
 echo ""
 
