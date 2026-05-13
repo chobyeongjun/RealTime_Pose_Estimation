@@ -272,16 +272,19 @@ def main():
                     else:
                         stats["fc_high_sigma"] += 1
                 else:
-                    # Codex P1 freshness gate: if producer froze, fc.seq /
-                    # fc.publish_done_mono_ns will not advance. We must NOT
-                    # keep sending PKT_COMMAND in that case — let Teensy's
-                    # command watchdog trip.
+                    # Codex P1+P2-followup: AGE-only staleness gate.
+                    # Bridge tick (200Hz) > vision producer (73Hz), so reading
+                    # the same seq multiple times is NORMAL. Only fall back
+                    # when publish_done_mono_ns is older than --max-forecast-age-ms.
                     now_mono_ns = time.monotonic_ns()
-                    seq_unchanged = (last_seq is not None and fc.seq == last_seq)
-                    age_ns = now_mono_ns - fc.publish_done_mono_ns \
-                             if fc.publish_done_mono_ns > 0 else 0
-                    too_old = (age_ns > max_age_ns) if fc.publish_done_mono_ns > 0 else False
-                    if seq_unchanged or too_old:
+                    if fc.publish_done_mono_ns > 0:
+                        age_ns = now_mono_ns - fc.publish_done_mono_ns
+                        too_old = age_ns > max_age_ns
+                    else:
+                        # No timestamp set yet (initial frames) — trust
+                        # valid_for_control() and let it through.
+                        too_old = False
+                    if too_old:
                         stats["fc_stale"] += 1
                     else:
                         q_pred = fc.q_pred[:]
@@ -291,7 +294,7 @@ def main():
                         tau_ff = [0.0] * N_JOINTS
                         send_cmd = True
                         last_pub_done_ns = fc.publish_done_mono_ns
-                    last_seq = fc.seq
+                    last_seq = fc.seq  # tracked for telemetry only
 
             # ── 2. Build + send frame ───────────────────────────────────
             if send_cmd:

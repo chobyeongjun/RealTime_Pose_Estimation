@@ -240,24 +240,28 @@ def test_default_gains_are_safe():
     assert min(kd) >= 0.0
 
 
-def test_bridge_rejects_stale_forecast_seq_unchanged():
-    """Codex P1 fix: if forecast seq does not advance, bridge must NOT keep
-    sending PKT_COMMAND. Same-seq reads on consecutive ticks → fc_stale."""
-    name = _shm_name("tss")
+def test_bridge_accepts_fresh_forecast_even_if_seq_unchanged():
+    """Codex P2 follow-up: bridge tick (200Hz) > vision producer (73Hz) means
+    same seq is read multiple times — this is NORMAL, not stale. Only age
+    against publish_done_mono_ns determines staleness."""
+    name = _shm_name("tfs")
     _publish_one(name, [0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-
     try:
         reader = ForecastReader(name)
         fc1 = reader.read()
         fc2 = reader.read()
         assert fc1 is not None and fc2 is not None
-        # Same publisher state → identical seq
-        assert fc1.seq == fc2.seq, "seq must be unchanged when publisher hasn't republished"
-        # First tick treats it as fresh; second tick must detect stale.
-        # We simulate the bridge's last_seq tracking inline:
-        last_seq = fc1.seq
-        is_stale = (fc2.seq == last_seq)
-        assert is_stale, "second read of frozen SHM must be flagged stale"
+        assert fc1.seq == fc2.seq, "same publisher state → same seq"
+
+        # Both reads have fresh publish_done_mono_ns (just published).
+        # AGE-only gate: age < max_age_ns → both must be valid for control.
+        max_age_ns = 50 * 1_000_000
+        now_ns = time.monotonic_ns()
+        age1 = now_ns - fc1.publish_done_mono_ns
+        age2 = now_ns - fc2.publish_done_mono_ns
+        assert age1 < max_age_ns and age2 < max_age_ns, \
+            "fresh publish_done must be under stale threshold"
+        # → bridge sends PKT_COMMAND on BOTH ticks (regression check)
         reader.close()
     finally:
         try:
