@@ -713,13 +713,28 @@ class SVO2FileSource:
             return False
         return False
 
-    def get_rgb(self):
-        self.zed.retrieve_image(self.image, sl.VIEW.LEFT)
-        return self.image.get_data()[:, :, :3].copy()
+    def get_rgb(self, copy=True, raw_bgra=False):
+        """API matched to ZEDCamera.get_rgb so PipelinedCamera works with SVO.
 
-    def get_depth(self):
+        Without this signature PipelinedCamera._loop calls
+        get_rgb(copy=True, raw_bgra=True) → TypeError in the capture thread →
+        ready_rgb event never sets → main blocks 1s timeout → 1Hz stuck.
+        """
+        self.zed.retrieve_image(self.image, sl.VIEW.LEFT)
+        if raw_bgra:
+            data = self.image.get_data()       # BGRA 4-channel
+            return data.copy() if copy else data
+        bgra = self.image.get_data()
+        bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
+        return bgr.copy() if copy else bgr
+
+    def get_depth(self, copy=True):
+        """API matched to ZEDCamera.get_depth.
+        Default copy=True preserves prior SVO2FileSource behavior.
+        """
         self.zed.retrieve_measure(self.depth, sl.MEASURE.DEPTH)
-        return self.depth.get_data().copy()
+        data = self.depth.get_data()
+        return data.copy() if copy else data
 
     def pixel_to_3d(self, x, y, depth_map=None, patch_radius=3):
         """2D 픽셀 좌표 → 3D 좌표 (패치 중앙값 depth 사용)"""
