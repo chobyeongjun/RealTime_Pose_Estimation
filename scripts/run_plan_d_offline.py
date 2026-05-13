@@ -57,7 +57,16 @@ from perception.plan_d_prototype import (   # noqa: E402
 
 
 def load_session(npz_path: str) -> dict:
-    """Load a walking-session npz produced by pipeline_main.py --record-pose-npz."""
+    """Load a walking-session npz produced by pipeline_main.py --record-pose-npz.
+
+    Schema versions (Codex consult #4):
+      v1 (no schema_version field): legacy 4-joint vector (hip + knee, L/R).
+          hip_z_world_m = ZED Z = walker-user HORIZONTAL distance (mislabelled).
+      v2 (schema_version=2): full 6-joint vector incl. thigh/shank inclinations.
+          hip_vertical_m = world-up projection of hip (what Plan D actually expects).
+          walker_user_distance_m = ZED Z = horizontal distance (explicit name).
+          hip_z_world_m kept = walker_user_distance_m for back-compat.
+    """
     z = np.load(npz_path, allow_pickle=True)
     required = [
         "t_s", "hip_z_world_m", "left_knee_rad", "right_knee_rad",
@@ -67,6 +76,9 @@ def load_session(npz_path: str) -> dict:
     if missing:
         raise ValueError(f"npz missing fields: {missing}")
     out = {k: z[k] for k in z.files}
+    out["__schema_version__"] = (
+        int(z["schema_version"]) if "schema_version" in z.files else 1
+    )
     return out
 
 
@@ -77,13 +89,51 @@ def run(session: dict, verbose: bool = True) -> dict:
     ambiguity_at_end, hilbert_valid_fraction, l1_omega_trace, hilbert_phi_trace, ...
     """
     t = session["t_s"]
-    hip_z = session["hip_z_world_m"]
-    q = np.column_stack([
-        session["left_hip_rad"],
-        session["left_knee_rad"],
-        session["right_hip_rad"],
-        session["right_knee_rad"],
-    ])  # (N, 4) — 4 joints (we don't have ankle in current SHM v1)
+    schema = session.get("__schema_version__", 1)
+
+    # Plan D Hilbert cold-start expects VERTICAL hip motion. In schema v2 this
+    # is `hip_vertical_m` (world-up projection). In v1 the only thing we have
+    # is `hip_z_world_m`, which (Codex consult #5) is actually ZED Z =
+    # horizontal distance, not vertical. Plan D will struggle on v1 data;
+    # warn so users know to re-record with v2.
+    if schema >= 2 and "hip_vertical_m" in session:
+        hip_z = session["hip_vertical_m"]
+        if verbose:
+            print(f"[schema v{schema}] hip signal = hip_vertical_m (world-up projection)")
+    else:
+        hip_z = session["hip_z_world_m"]
+        if verbose:
+            print(
+                f"[schema v{schema}] hip signal = hip_z_world_m (legacy ZED Z; "
+                f"may be horizontal distance, see Codex consult #5)."
+            )
+
+    if schema >= 2 and all(
+        k in session for k in (
+            "left_thigh_inclination_rad", "right_thigh_inclination_rad",
+            "left_shank_inclination_rad", "right_shank_inclination_rad",
+        )
+    ):
+        # 6-joint vector in the order Plan D spec uses
+        q = np.column_stack([
+            session["left_thigh_inclination_rad"],
+            session["left_knee_rad"],
+            session["left_shank_inclination_rad"],
+            session["right_thigh_inclination_rad"],
+            session["right_knee_rad"],
+            session["right_shank_inclination_rad"],
+        ])  # (N, 6)
+        if verbose:
+            print(f"[schema v{schema}] q vector = 6 joints (thigh+knee+shank, L/R)")
+    else:
+        q = np.column_stack([
+            session["left_hip_rad"],
+            session["left_knee_rad"],
+            session["right_hip_rad"],
+            session["right_knee_rad"],
+        ])  # (N, 4) legacy fallback
+        if verbose:
+            print(f"[schema v{schema}] q vector = 4 joints (hip+knee, L/R, legacy)")
     n_joints = q.shape[1]
     valid = session["valid"]
     n = len(t)

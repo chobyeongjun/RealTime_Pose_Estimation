@@ -62,6 +62,7 @@ from calibration import StandingCalibration, ZEDIMUWorldFrame
 from joint_3d import compute_joint_state
 from safety_guard import DepthSafetyGuard, SafetyLevel
 from bone_constraint import BoneLengthConstraint
+from depth_hold import DepthHoldLayer
 
 # benchmarks 경로를 모듈 레벨에서 한 번만 추가
 _BENCH_DIR = os.path.join(_HERE, '..', 'benchmarks')
@@ -211,6 +212,23 @@ class Pipeline:
         self._predictor: 'PlanDPredictor | None' = None
         self._plan_d_log_counter = 0
         self._plan_d_log_interval = 200   # 매 200 frames 마다 log
+
+        # Feed-attempt counters (Codex consult #1: surface silent failures)
+        # Categorize why Plan D feed was/wasn't called so Phase 2 effects can be
+        # measured. Printed every _plan_d_log_interval frames.
+        from collections import Counter as _Counter
+        self._feed_attempts = 0
+        self._feed_success  = 0
+        self._feed_skip     = _Counter()    # reasons: 'state_invalid', 'no_raw3d',
+                                            #          'six_invalid', 'feed_exc:<type>'
+
+        # depth_hold layer (Phase 3 wire — only active when --enable-depth-hold)
+        self.depth_hold: 'DepthHoldLayer | None' = (
+            DepthHoldLayer(max_hold_frames=3)
+            if getattr(args, 'enable_depth_hold', False) else None
+        )
+        if self.depth_hold is not None:
+            print("[Pipeline] DepthHoldLayer enabled (max_hold_frames=3)")
         if getattr(args, 'enable_plan_d', False) and _HAS_PLAN_D:
             try:
                 self._predictor = PlanDPredictor(
@@ -450,6 +468,20 @@ class Pipeline:
         else:
             raw_3d = {}
 
+        # ③.4 Depth hold — short-burst NaN smoothing on raw_3d. Each joint that
+        # disappears from raw_3d (ZED depth NaN) is held with its last-good 3D
+        # for up to MAX_HOLD_FRAMES; longer gaps are dropped so the frame goes
+        # invalid → Plan D EKF predict-only fallback. Must run BEFORE bone_bc
+        # so outlier projection sees the smoothed 3D (depth_hold.py:5-13 design).
+        # _hold_status (codex consult #7) → Plan D sigma escalation later.
+        self._last_hold_status = {}
+        if self.depth_hold is not None:
+            raw_3d, self._last_hold_status = self.depth_hold.step(
+                raw_3d,
+                getattr(result, 'confidences', {}),
+                expected_joints=list(KEYPOINT_ORDER_6),
+            )
+
         # ③.5 Bone length constraint — 보행 중 outlier 투영 보정 (Method 무관)
         #     캘리브 중엔 샘플만 쌓고 apply 안 함. ref 확정 후 매 프레임 apply.
         if self.bone_bc.ready:
@@ -458,13 +490,21 @@ class Pipeline:
             self._bone_hit_recent = 0
         _t3 = time.perf_counter()
 
-        # ④ JointState
+        # ④ JointState — pass world_up_vec so thigh/shank inclinations populate.
+        #   Without this, state.{thigh,shank}_inclination stays None, the
+        #   Plan D feed block at line 633 raises 'not all 6 joints valid',
+        #   bare-except swallows it, predictor.feed() never runs in real time,
+        #   and cascade transitions stay at 0 forever.
         kp2d  = getattr(result, 'keypoints_2d', {})
         confs = getattr(result, 'confidences',  {})
-        state = compute_joint_state(kp2d, raw_3d, confs, timestamp_us=ts_us)
+        method = self.args.method.upper()
+        world_up = None
+        if method == 'B' and hasattr(self.calibrator, 'world_up_in_camera'):
+            world_up = self.calibrator.world_up_in_camera()
+        state = compute_joint_state(kp2d, raw_3d, confs,
+                                    timestamp_us=ts_us, world_up_vec=world_up)
 
         # ⑤ Calibration (시작 30프레임만)
-        method = self.args.method.upper()
         if method == 'A':
             cal: StandingCalibration = self.calibrator
             if not cal.done:
@@ -612,13 +652,27 @@ class Pipeline:
         # 진정 *thigh_inclination + shank_inclination 의 *진정 *state* 에 있음
         # 진정 *t_now = monotonic ns (Plan D 의 *진정 *time reference)
         # 진정 *forecast(τ) 의 *τ = T8 - T4 의 *진정 *제어 lookahead
-        if self._predictor is not None and state.valid and raw_3d:
-            try:
-                import math as _math
-                # 진정 *6 joints — JointState3D 의 *진정 *inclinations 사용
-                # state.{left,right}_thigh_inclination, {left,right}_shank_inclination
-                # state.{left,right}_knee_flexion 가 *진정 *radian compute 의무
-                # 진정 *None 의무 fallback: 0.0 (단 *진정 *valid check 의무)
+        # Predictor feed attempt accounting (Codex consult #1).
+        if self._predictor is None:
+            pass  # plan-d disabled, no counters
+        elif not state.valid:
+            self._feed_skip['state_invalid'] += 1
+        elif not raw_3d:
+            self._feed_skip['no_raw3d'] += 1
+        else:
+            self._feed_attempts += 1
+            import math as _math
+            six_valid = (
+                state.left_thigh_inclination is not None
+                and state.left_knee_flexion is not None
+                and state.left_shank_inclination is not None
+                and state.right_thigh_inclination is not None
+                and state.right_knee_flexion is not None
+                and state.right_shank_inclination is not None
+            )
+            if not six_valid:
+                self._feed_skip['six_invalid'] += 1
+            else:
                 def _deg(val):
                     return 0.0 if val is None else float(val)
                 q_deg = [
@@ -629,42 +683,67 @@ class Pipeline:
                     _deg(state.right_knee_flexion),
                     _deg(state.right_shank_inclination),
                 ]
-                # Check 모든 6 joints 의무 *진정 *valid (None 의무 X)
-                six_valid = (
-                    state.left_thigh_inclination is not None
-                    and state.left_knee_flexion is not None
-                    and state.left_shank_inclination is not None
-                    and state.right_thigh_inclination is not None
-                    and state.right_knee_flexion is not None
-                    and state.right_shank_inclination is not None
-                )
-                if not six_valid:
-                    raise RuntimeError("not all 6 joints valid")
                 q_rad = np.array([_math.radians(d) for d in q_deg], dtype=np.float64)
-                # σ per joint — depth confidence + box_conf 기반 (improve TODO Phase B)
-                # 진정 *진정 *1차: uniform 0.05 rad (~3°). 진정 *진정 *진정 *Phase B
-                # 의 *per-kp depth uncertainty 기반 동적 σ 의무.
+                # σ per joint — fresh = 0.05 rad (~3°). Held-via-depth_hold
+                # joints get inflated σ = 0.20 rad (~11°) so the EKF down-
+                # weights them rather than treating a stale ankle as a fresh
+                # ankle (Codex consult #7). KEYPOINT_ORDER_6 maps directly:
+                #   q[0..2] ← left  hip / knee / ankle
+                #   q[3..5] ← right hip / knee / ankle
                 sigma_per_joint = np.full(6, 0.05, dtype=np.float64)
-                # hip vertical (world frame)
+                if self.depth_hold is not None and self._last_hold_status:
+                    for i, kp in enumerate(KEYPOINT_ORDER_6):
+                        if self._last_hold_status.get(kp) == 'held':
+                            sigma_per_joint[i] = 0.20
+
+                # Codex consult #5 / Phase 2B — Plan D Hilbert envelope expects
+                # hip VERTICAL motion (gravity axis). Previously this fed
+                # `raw_3d['left_hip'][2]`, which is ZED Z = optical axis =
+                # walker→user HORIZONTAL distance. That yields a quasi-DC signal
+                # during walking → ω cold-start fails → ω learned at ~0.1 Hz.
+                # Project hip onto world up to recover true vertical oscillation.
                 l_hip = raw_3d.get('left_hip')
                 r_hip = raw_3d.get('right_hip')
-                if l_hip is not None and r_hip is not None:
-                    hip_z = 0.5 * (float(l_hip[2]) + float(r_hip[2]))
-                elif l_hip is not None:
-                    hip_z = float(l_hip[2])
-                elif r_hip is not None:
-                    hip_z = float(r_hip[2])
+                if world_up is not None:
+                    if l_hip is not None and r_hip is not None:
+                        hip_vert = 0.5 * (
+                            float(np.dot(l_hip, world_up))
+                            + float(np.dot(r_hip, world_up))
+                        )
+                    elif l_hip is not None:
+                        hip_vert = float(np.dot(l_hip, world_up))
+                    elif r_hip is not None:
+                        hip_vert = float(np.dot(r_hip, world_up))
+                    else:
+                        hip_vert = float('nan')
                 else:
-                    hip_z = float('nan')
+                    # method != B fallback: use raw Z (legacy behavior)
+                    if l_hip is not None and r_hip is not None:
+                        hip_vert = 0.5 * (float(l_hip[2]) + float(r_hip[2]))
+                    elif l_hip is not None:
+                        hip_vert = float(l_hip[2])
+                    elif r_hip is not None:
+                        hip_vert = float(r_hip[2])
+                    else:
+                        hip_vert = float('nan')
 
                 t_now_s = time.monotonic_ns() / 1e9
-                self._predictor.feed(
-                    t_now=t_now_s,
-                    q=q_rad,
-                    sigma_per_joint=sigma_per_joint,
-                    hip_z_world_m=hip_z,
-                )
-                # Forecast publish (Plan D EKF τ-ahead → /hwalker_forecast)
+                try:
+                    self._predictor.feed(
+                        t_now=t_now_s,
+                        q=q_rad,
+                        sigma_per_joint=sigma_per_joint,
+                        hip_z_world_m=hip_vert,
+                    )
+                    self._feed_success += 1
+                except Exception as _feed_exc:
+                    self._feed_skip[f'feed_exc:{type(_feed_exc).__name__}'] += 1
+                    if self._frame_id < 5:
+                        print(f"[Pipeline][WARN] Plan D feed exception: "
+                              f"{_feed_exc}", flush=True)
+
+                # Forecast publish (Plan D EKF τ-ahead → /hwalker_forecast).
+                # Guarded separately so a publish bug never masks the feed.
                 if self.pub_forecast is not None:
                     try:
                         fc = self._predictor.forecast(self._forecast_tau_s)
@@ -699,11 +778,14 @@ class Pipeline:
                         if self._frame_id < 5:
                             print(f"[Pipeline][WARN] Forecast publish failed: "
                                   f"{_exc_fc}", flush=True)
-                # 매 200 frames 의무 console log (production 의 *진정 *영향 *최소*)
-                self._plan_d_log_counter += 1
-                if self._plan_d_log_counter >= self._plan_d_log_interval:
-                    self._plan_d_log_counter = 0
-                    p = self._predictor
+
+        # 200-frame Plan D + feed counters log (always runs while predictor exists)
+        if self._predictor is not None:
+            self._plan_d_log_counter += 1
+            if self._plan_d_log_counter >= self._plan_d_log_interval:
+                self._plan_d_log_counter = 0
+                p = self._predictor
+                try:
                     forecast_50ms = p.forecast(0.050)
                     hs_L = p.predict_heel_strike("L", max_t_ahead_s=2.0, min_omega_rad_s=1.0)
                     print(
@@ -715,9 +797,26 @@ class Pipeline:
                         f"conf={hs_L.confidence:.2f} ready={hs_L.ready}",
                         flush=True,
                     )
-            except Exception as _exc:
-                # production 의무 graceful X — 단 *진정 *log + continue
-                pass
+                except Exception:
+                    pass
+                feed_total = self._feed_attempts + sum(self._feed_skip.values())
+                if feed_total > 0:
+                    fed_pct = 100.0 * self._feed_success / max(1, feed_total)
+                    skip_summary = ", ".join(
+                        f"{k}={v}" for k, v in self._feed_skip.most_common()
+                    ) or "(none)"
+                    print(
+                        f"[Plan D feed] success={self._feed_success}/{feed_total} "
+                        f"({fed_pct:.1f}%) skips: {skip_summary}",
+                        flush=True,
+                    )
+                if self.depth_hold is not None:
+                    s = self.depth_hold.stats()
+                    print(
+                        f"[depth-hold] fresh={s['fresh']} held={s['held']} "
+                        f"dropped={s['dropped']}",
+                        flush=True,
+                    )
 
         # ⑥.5 RT trace logging (--trace-csv 옵션 시, per-frame T0~T4)
         if self._trace_writer is not None:
@@ -745,25 +844,68 @@ class Pipeline:
             self._frame_id += 1
 
         # ⑦ Plan D offline validation 용 dump (record-pose-npz)
+        # Schema v2 (Codex consult #4 + #5):
+        #   - schema_version = 2 (explicit field in savez, see save block)
+        #   - added 4 inclination_rad arrays so offline run_plan_d_offline
+        #     can build the 6-joint vector (Plan D spec).
+        #   - added hip_vertical_m (world-up projection, value actually fed
+        #     to Plan D — see Phase 2B fix) AND walker_user_distance_m
+        #     (ZED Z = horizontal distance, used by future cable kinematics).
+        #   - hip_z_world_m is kept for back-compat but now equals the
+        #     horizontal distance (was previously ambiguous).
         if getattr(self.args, 'record_pose_npz', None):
             if not hasattr(self, '_dump_buf'):
                 self._dump_buf = {
-                    't_s': [], 'hip_z_world_m': [], 'left_hip_z': [], 'right_hip_z': [],
+                    't_s': [],
+                    'hip_z_world_m': [],          # legacy = ZED Z (horizontal)
+                    'walker_user_distance_m': [], # explicit new name
+                    'hip_vertical_m': [],         # world-up projection
+                    'left_hip_z': [], 'right_hip_z': [],
                     'left_knee_rad': [], 'right_knee_rad': [],
                     'left_hip_rad': [], 'right_hip_rad': [],
+                    'left_thigh_inclination_rad': [],
+                    'right_thigh_inclination_rad': [],
+                    'left_shank_inclination_rad': [],
+                    'right_shank_inclination_rad': [],
                     'valid': [],
                 }
             l_hip_z = float(raw_3d.get('left_hip', (0.0, 0.0, np.nan))[2]) if raw_3d else np.nan
             r_hip_z = float(raw_3d.get('right_hip', (0.0, 0.0, np.nan))[2]) if raw_3d else np.nan
             hip_z_mean = np.nanmean([l_hip_z, r_hip_z]) if not (np.isnan(l_hip_z) and np.isnan(r_hip_z)) else np.nan
+
+            # world-up projection (same calc as Plan D feed path above) —
+            # NaN when world_up unavailable or both hips missing.
+            if world_up is not None and raw_3d:
+                l = raw_3d.get('left_hip')
+                r = raw_3d.get('right_hip')
+                if l is not None and r is not None:
+                    hip_vert_dump = 0.5 * (float(np.dot(l, world_up)) + float(np.dot(r, world_up)))
+                elif l is not None:
+                    hip_vert_dump = float(np.dot(l, world_up))
+                elif r is not None:
+                    hip_vert_dump = float(np.dot(r, world_up))
+                else:
+                    hip_vert_dump = float('nan')
+            else:
+                hip_vert_dump = float('nan')
+
+            def _maybe_rad(deg_val):
+                return float('nan') if deg_val is None else float(np.deg2rad(deg_val))
+
             self._dump_buf['t_s'].append(ts_us * 1e-6)
             self._dump_buf['hip_z_world_m'].append(hip_z_mean)
+            self._dump_buf['walker_user_distance_m'].append(hip_z_mean)
+            self._dump_buf['hip_vertical_m'].append(hip_vert_dump)
             self._dump_buf['left_hip_z'].append(l_hip_z)
             self._dump_buf['right_hip_z'].append(r_hip_z)
             self._dump_buf['left_knee_rad'].append(np.deg2rad(flexion.left_knee_deg))
             self._dump_buf['right_knee_rad'].append(np.deg2rad(flexion.right_knee_deg))
             self._dump_buf['left_hip_rad'].append(np.deg2rad(flexion.left_hip_deg))
             self._dump_buf['right_hip_rad'].append(np.deg2rad(flexion.right_hip_deg))
+            self._dump_buf['left_thigh_inclination_rad'].append(_maybe_rad(state.left_thigh_inclination))
+            self._dump_buf['right_thigh_inclination_rad'].append(_maybe_rad(state.right_thigh_inclination))
+            self._dump_buf['left_shank_inclination_rad'].append(_maybe_rad(state.left_shank_inclination))
+            self._dump_buf['right_shank_inclination_rad'].append(_maybe_rad(state.right_shank_inclination))
             self._dump_buf['valid'].append(bool(flexion.valid))
 
         # release는 이미 get_rgb 직후에 호출됨 (new_api). 여기서는 아무것도 안 함.
@@ -1080,19 +1222,34 @@ class Pipeline:
             try:
                 np.savez(
                     out_path,
+                    # schema_version explicit (Codex consult #4):
+                    #   v1 = legacy 4-joint (knee+hip rad only)
+                    #   v2 = + thigh/shank inclinations + hip_vertical + walker_user_distance
+                    schema_version=np.int32(2),
+                    joint_order_rad=np.array(
+                        ['left_thigh_inc', 'left_knee', 'left_shank_inc',
+                         'right_thigh_inc', 'right_knee', 'right_shank_inc'],
+                        dtype='U24'
+                    ),
                     t_s=np.array(self._dump_buf['t_s'], dtype=np.float64),
                     hip_z_world_m=np.array(self._dump_buf['hip_z_world_m'], dtype=np.float64),
+                    walker_user_distance_m=np.array(self._dump_buf['walker_user_distance_m'], dtype=np.float64),
+                    hip_vertical_m=np.array(self._dump_buf['hip_vertical_m'], dtype=np.float64),
                     left_hip_z=np.array(self._dump_buf['left_hip_z'], dtype=np.float64),
                     right_hip_z=np.array(self._dump_buf['right_hip_z'], dtype=np.float64),
                     left_knee_rad=np.array(self._dump_buf['left_knee_rad'], dtype=np.float64),
                     right_knee_rad=np.array(self._dump_buf['right_knee_rad'], dtype=np.float64),
                     left_hip_rad=np.array(self._dump_buf['left_hip_rad'], dtype=np.float64),
                     right_hip_rad=np.array(self._dump_buf['right_hip_rad'], dtype=np.float64),
+                    left_thigh_inclination_rad=np.array(self._dump_buf['left_thigh_inclination_rad'], dtype=np.float64),
+                    right_thigh_inclination_rad=np.array(self._dump_buf['right_thigh_inclination_rad'], dtype=np.float64),
+                    left_shank_inclination_rad=np.array(self._dump_buf['left_shank_inclination_rad'], dtype=np.float64),
+                    right_shank_inclination_rad=np.array(self._dump_buf['right_shank_inclination_rad'], dtype=np.float64),
                     valid=np.array(self._dump_buf['valid'], dtype=bool),
                     method=str(self.args.method),
                 )
                 n = len(self._dump_buf['t_s'])
-                print(f"[Pipeline] Pose dump saved: {out_path} ({n} frames)")
+                print(f"[Pipeline] Pose dump saved (schema v2): {out_path} ({n} frames)")
             except Exception as exc:
                 print(f"[Pipeline][WARN] Pose dump failed: {exc}", file=sys.stderr)
 
@@ -1180,6 +1337,13 @@ def parse_args() -> argparse.Namespace:
              "  fields: rgb_ts_ns, depth_ts_ns, publish_done_mono_ns, frame_id,\n"
              "          kpts_3d_m, kpt_conf, kpts_2d_px, kp_sigma_m, valid_mask_bits.\n"
              "  control repo C++ reader 의무 (cpp_shm_v2_reader_skeleton.md spec).",
+    )
+    parser.add_argument(
+        "--enable-depth-hold", dest="enable_depth_hold", action="store_true",
+        help="Short-burst depth NaN smoothing (max 3 frames). Inserts\n"
+             "  DepthHoldLayer between _batch_2d_to_3d and bone_bc.apply so\n"
+             "  brief ZED PERFORMANCE NaN flickers do not invalidate the entire\n"
+             "  frame. Held points carry inflated σ when fed to Plan D EKF.",
     )
     return parser.parse_args()
 

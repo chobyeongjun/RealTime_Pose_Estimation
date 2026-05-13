@@ -164,6 +164,7 @@ class ZEDIMUWorldFrame:
         """
         self._cam = zed_camera
         self._R   = None          # 3×3 rotation matrix (cam → world)
+        self._world_up_camera = None  # world up axis expressed in camera frame
         self._imu_ok = False
         self._neutral: Optional[Dict[str, float]] = None
 
@@ -199,9 +200,11 @@ class ZEDIMUWorldFrame:
         q_mean = np.mean(quats, axis=0)
         q_mean /= np.linalg.norm(q_mean)
         self._R = self._quat_to_R(q_mean)
+        self._world_up_camera = self._compute_world_up_camera(q_mean)
         self._imu_ok = True
         print('[CalibB] IMU rotation matrix 확정:')
         print(self._R.round(4))
+        print(f'[CalibB] world up in camera frame: {self._world_up_camera.round(4)}')
         return True
 
     def refresh_R(self):
@@ -215,6 +218,41 @@ class ZEDIMUWorldFrame:
         q = imu.get_pose().get_orientation().get()
         q /= np.linalg.norm(q)
         self._R = self._quat_to_R(q)
+        self._world_up_camera = self._compute_world_up_camera(q)
+
+    def world_up_in_camera(self) -> Optional[np.ndarray]:
+        """World up axis (gravity-opposite) expressed in camera frame.
+
+        Returns None until init() succeeds. Used by compute_joint_state for
+        thigh/shank inclination calculations (joint_3d.py:232).
+
+        Cached during init() and refresh_R(); production runtime uses static
+        R (skip_imu=True) so this is set once at startup.
+        """
+        if not self._imu_ok or self._world_up_camera is None:
+            return None
+        return self._world_up_camera
+
+    @staticmethod
+    def _compute_world_up_camera(q) -> np.ndarray:
+        """ZED IMU quaternion [x, y, z, w] → world up vector in camera frame.
+
+        Same arithmetic as ``ZEDCamera.get_gravity_vector`` in
+        ``src/perception/benchmarks/zed_camera.py:553-572``. Reusing the exact
+        formula keeps quaternion convention compatibility — ZED SDK's q plus
+        this expression is the verified producer of a sane up direction in
+        this codebase.
+
+        Equivalent to ``_quat_to_R(q)[:, 1]`` (world Y axis in camera frame),
+        kept separate so unit tests can exercise the formula without building
+        a full R matrix.
+        """
+        x, y, z, w = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+        return np.array([
+            2.0 * (x * y - w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z + w * x),
+        ], dtype=np.float32)
 
     @staticmethod
     def _quat_to_R(q) -> np.ndarray:
