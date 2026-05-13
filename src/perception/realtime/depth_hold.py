@@ -51,18 +51,35 @@ class DepthHoldLayer:
         self,
         raw_3d: Dict[str, np.ndarray],
         confs: Dict[str, float],
+        expected_joints: Optional[list] = None,
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, str]]:
         """Return (filled_3d, status_per_kp).
 
         status_per_kp[name] ∈ {'fresh', 'held', 'dropped', 'absent'}.
-        'absent' = no last-good and current is NaN (caller treats as invalid).
+        'absent' = no last-good and current is missing/NaN.
+
+        Codex P2: _batch_2d_to_3d omits invalid keypoints from raw_3d (key
+        simply absent) rather than including them with z=NaN. So we must
+        iterate over the *expected* joint name set, not just raw_3d.keys().
         """
+        # Build the set we must process this tick:
+        #   - all currently-fresh joints
+        #   - all explicitly expected joints (caller list)
+        #   - all joints we are still holding (so they keep aging out)
+        names = set(raw_3d.keys()) | set(self._cache.keys())
+        if expected_joints:
+            names.update(expected_joints)
+
         out: Dict[str, np.ndarray] = {}
         status: Dict[str, str] = {}
-        for name, pt in raw_3d.items():
-            xyz = np.asarray(pt, dtype=np.float32)
-            z = float(xyz[2]) if xyz.shape[0] >= 3 else float('nan')
-            fresh = np.isfinite(z) and 0.1 <= z <= 3.0
+        for name in names:
+            pt = raw_3d.get(name)
+            fresh = False
+            xyz = None
+            if pt is not None:
+                xyz = np.asarray(pt, dtype=np.float32)
+                z = float(xyz[2]) if xyz.shape[0] >= 3 else float('nan')
+                fresh = np.isfinite(z) and 0.1 <= z <= 3.0
 
             if fresh:
                 self._cache[name] = _LastGood(pos=xyz.copy(),
@@ -73,7 +90,7 @@ class DepthHoldLayer:
                 self.fresh_total += 1
                 continue
 
-            # not fresh — try hold
+            # Missing or NaN this tick — try hold
             lg = self._cache.get(name)
             if lg is not None and lg.age_frames < self.max_hold:
                 lg.age_frames += 1
@@ -81,14 +98,10 @@ class DepthHoldLayer:
                 status[name] = 'held'
                 self.held_total += 1
             else:
-                # too long or no prior good sample — drop
                 status[name] = 'dropped' if lg is not None else 'absent'
                 self.dropped_total += 1
-                # remove cache so next fresh starts age=0
                 self._cache.pop(name, None)
 
-        # any joint that appeared in raw_3d but was held — confs may still
-        # be valid since hold uses last-good. Don't tamper with confs here.
         return out, status
 
     def stats(self) -> Dict[str, int]:

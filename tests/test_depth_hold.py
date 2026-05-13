@@ -101,6 +101,39 @@ def test_per_joint_independent():
     assert np.isclose(out["R"][2], 1.1)
 
 
+def test_missing_keypoint_held_via_expected_joints():
+    """Codex P2: raw_3d may OMIT a NaN keypoint entirely. Hold must still trigger."""
+    layer = DepthHoldLayer(max_hold_frames=3)
+    # frame 0: hip fresh, knee fresh
+    layer.step({
+        "hip":  np.array([0,0,1.0], np.float32),
+        "knee": np.array([0,0,1.2], np.float32),
+    }, {"hip": 1.0, "knee": 1.0}, expected_joints=["hip", "knee"])
+
+    # frame 1: knee depth went NaN — _batch_2d_to_3d DROPS the key entirely
+    out, status = layer.step(
+        {"hip": np.array([0,0,1.05], np.float32)},  # knee absent
+        {"hip": 1.0, "knee": 0.9},
+        expected_joints=["hip", "knee"],
+    )
+    assert status["hip"] == "fresh"
+    assert status["knee"] == "held"
+    assert np.isclose(out["knee"][2], 1.2)
+
+
+def test_missing_keypoint_drops_after_max_hold_without_expected():
+    """If caller doesn't pass expected_joints, cache still ages out via own keys."""
+    layer = DepthHoldLayer(max_hold_frames=2)
+    layer.step({"hip": np.array([0,0,1.0], np.float32)}, {"hip": 1.0})
+    # hip omitted — no expected list — but cache key still exists
+    out, status = layer.step({}, {})
+    assert status["hip"] == "held"
+    out, status = layer.step({}, {})
+    assert status["hip"] == "held"
+    out, status = layer.step({}, {})
+    assert status["hip"] == "dropped"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
