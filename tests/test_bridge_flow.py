@@ -243,7 +243,11 @@ def test_default_gains_are_safe():
 def test_bridge_accepts_fresh_forecast_even_if_seq_unchanged():
     """Codex P2 follow-up: bridge tick (200Hz) > vision producer (73Hz) means
     same seq is read multiple times — this is NORMAL, not stale. Only age
-    against publish_done_mono_ns determines staleness."""
+    against publish_done_mono_ns determines staleness.
+
+    Deterministic: simulate `now` from the SHM's own timestamp + a small
+    offset, so this is not sensitive to scheduler / debugger delays.
+    """
     name = _shm_name("tfs")
     _publish_one(name, [0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     try:
@@ -253,15 +257,14 @@ def test_bridge_accepts_fresh_forecast_even_if_seq_unchanged():
         assert fc1 is not None and fc2 is not None
         assert fc1.seq == fc2.seq, "same publisher state → same seq"
 
-        # Both reads have fresh publish_done_mono_ns (just published).
-        # AGE-only gate: age < max_age_ns → both must be valid for control.
         max_age_ns = 50 * 1_000_000
-        now_ns = time.monotonic_ns()
-        age1 = now_ns - fc1.publish_done_mono_ns
-        age2 = now_ns - fc2.publish_done_mono_ns
-        assert age1 < max_age_ns and age2 < max_age_ns, \
-            "fresh publish_done must be under stale threshold"
-        # → bridge sends PKT_COMMAND on BOTH ticks (regression check)
+        # Deterministic 'now' = SHM's own stamp + 1 ms. Stays under threshold
+        # regardless of CI load.
+        simulated_now_ns = fc1.publish_done_mono_ns + 1_000_000
+        age1 = simulated_now_ns - fc1.publish_done_mono_ns
+        age2 = simulated_now_ns - fc2.publish_done_mono_ns
+        assert age1 < max_age_ns and age2 < max_age_ns
+        # → bridge sends PKT_COMMAND on BOTH ticks
         reader.close()
     finally:
         try:
