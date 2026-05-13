@@ -50,14 +50,21 @@ DEPTH_MIN, DEPTH_MAX = 0.1, 3.0
 
 
 def categorize_frame(result, depth_at_kp) -> str:
-    """Return one of: ok | yolo_no_detection | conf_low_kp | depth_nan | depth_oor | triplet_missing"""
-    if not getattr(result, 'detected', False):
-        return "yolo_no_detection"
+    """Return one of: ok | yolo_no_box | conf_low_kp | depth_nan | depth_oor | triplet_missing
 
+    Codex P2: TRTPoseEngine sets detected=True only when ≥3 keypoints have conf>0.3.
+    If detected=False AND confidences/keypoints_2d are non-empty, the model DID
+    find a person but the keypoints were low-confidence — that's 'conf_low_kp',
+    not 'no detection'. Check confidences first, then fall back to no-box.
+    """
     confs = getattr(result, 'confidences', {}) or {}
     kp2d  = getattr(result, 'keypoints_2d', {}) or {}
 
-    # which joints pass conf
+    # If the engine returned absolutely nothing → no person box at all.
+    if not confs and not kp2d:
+        return "yolo_no_box"
+
+    # which joints pass conf threshold
     conf_ok = {n for n in JOINT_NAMES_6 if confs.get(n, 0.0) >= CONF_THRESHOLD}
     if len(conf_ok) < 3:
         return "conf_low_kp"
@@ -147,8 +154,10 @@ def main():
     max_n = total if args.max_frames < 0 else min(args.max_frames, total)
     print(f"Will process:     {max_n}")
 
-    # Load TRT engine
+    # Load TRT engine — Codex P1: __init__ only stores config, load() creates
+    # CUDA context + tensors. Without this, predict() crashes on _input_tensor.
     model = TRTPoseEngine(engine_path, imgsz=args.imgsz)
+    model.load()
 
     rt = sl.RuntimeParameters()
     img = sl.Mat()
@@ -158,7 +167,9 @@ def main():
     categories = Counter()
     per_joint_conf = {n: [] for n in JOINT_NAMES_6}
     per_joint_depth = {n: [] for n in JOINT_NAMES_6}
-    box_confs = []
+    # Codex P2: TRTPoseEngine has no result.box_conf field. Use max joint conf
+    # as a proxy for 'box presence' confidence.
+    max_kp_confs = []
 
     t0 = time.monotonic()
     dumped_frames = 0
@@ -174,7 +185,9 @@ def main():
         bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
 
         result = model.predict(bgr)
-        box_confs.append(float(getattr(result, 'box_conf', 0.0) or 0.0))
+        # Codex P2 fix: derive box-presence proxy from max keypoint conf.
+        frame_confs = getattr(result, 'confidences', {}) or {}
+        max_kp_confs.append(max(frame_confs.values()) if frame_confs else 0.0)
 
         # Sample depth at each detected keypoint pixel
         depth_at_kp = {}
@@ -203,7 +216,8 @@ def main():
                     cv2.circle(vis, (int(u), int(v)), 6, color, 2)
                     cv2.putText(vis, f"{n[:5]}:{c:.2f}", (int(u)+6, int(v)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-            cv2.putText(vis, f"frame {fi} cat={cat} box={result.box_conf:.2f}",
+            max_c = max(confs.values()) if confs else 0.0
+            cv2.putText(vis, f"frame {fi} cat={cat} max_kp_conf={max_c:.2f}",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             png = out_dir / f"diag_frame_{fi:04d}.png"
             cv2.imwrite(str(png), vis)
@@ -259,8 +273,8 @@ def main():
         print(f"  {n:14s}  N={s['samples']:5d}  NaN={s['nan_ratio']*100:4.1f}%  "
               f"p50={s['p50']:.2f}m  p95={s['p95']:.2f}m  in[0.1,3.0]: {s['in_range_pct']:5.1f}%")
 
-    print("\n=== Box confidence ===")
-    bc = np.array(box_confs)
+    print("\n=== Max-keypoint confidence per frame (box-presence proxy) ===")
+    bc = np.array(max_kp_confs)
     print(f"  p50={np.percentile(bc, 50):.2f}  p95={np.percentile(bc, 95):.2f}  "
           f"max={np.max(bc):.2f}  >0.5: {np.mean(bc >= 0.5)*100:.1f}%")
 
@@ -303,7 +317,7 @@ def main():
         "category_pct": cat_pct,
         "conf_stats": conf_stats,
         "depth_stats": depth_stats,
-        "box_conf_summary": {
+        "max_kp_conf_summary": {
             "p50": float(np.percentile(bc, 50)),
             "p95": float(np.percentile(bc, 95)),
             "above_threshold_pct": float(np.mean(bc >= 0.5) * 100.0),
@@ -315,7 +329,7 @@ def main():
     print()
     print("=== HOW TO READ ===")
     print("  ok                  → valid frame (= pipeline_main valid=True)")
-    print("  yolo_no_detection   → YOLO box_conf below detection threshold")
+    print("  yolo_no_box         → engine returned no keypoints at all")
     print("  conf_low_kp         → joint conf < 0.5 (env/occlusion → A; or model itself bad → C)")
     print("  depth_nan           → keypoint OK but ZED depth NaN at pixel (env, opaque clothing, distance)")
     print("  depth_oor           → depth finite but outside [0.1, 3.0]m (too close/far)")
