@@ -101,6 +101,8 @@ def main():
     ap.add_argument("svo")
     ap.add_argument("--max-frames", type=int, default=300,
                     help="Process at most N frames (300=5s @ 60Hz). Use -1 for all.")
+    ap.add_argument("--start-frame", type=int, default=0,
+                    help="Skip to this SVO frame before analyzing (e.g., 2000 = skip 16s setup)")
     ap.add_argument("--out-dir", default=None,
                     help="Where to write JSON/PNG. Default: alongside SVO.")
     ap.add_argument("--imgsz", type=int, default=640)
@@ -151,8 +153,13 @@ def main():
 
     total = cam.get_svo_number_of_frames()
     print(f"SVO total frames: {total}")
-    max_n = total if args.max_frames < 0 else min(args.max_frames, total)
-    print(f"Will process:     {max_n}")
+    start = max(0, min(args.start_frame, total - 1))
+    if start > 0:
+        cam.set_svo_position(start)
+        print(f"Skipping to frame {start} (≈{start/120:.1f}s into SVO)")
+    remaining = total - start
+    max_n = remaining if args.max_frames < 0 else min(args.max_frames, remaining)
+    print(f"Will process:     {max_n} frames (range [{start}..{start+max_n}])")
 
     # Load TRT engine — Codex P1: __init__ only stores config, load() creates
     # CUDA context + tensors. Without this, predict() crashes on _input_tensor.
@@ -173,6 +180,7 @@ def main():
 
     t0 = time.monotonic()
     dumped_frames = 0
+    frame_offset = start
     for fi in range(max_n):
         e = cam.grab(rt)
         if e != sl.ERROR_CODE.SUCCESS:
@@ -217,9 +225,11 @@ def main():
                     cv2.putText(vis, f"{n[:5]}:{c:.2f}", (int(u)+6, int(v)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
             max_c = max(confs.values()) if confs else 0.0
-            cv2.putText(vis, f"frame {fi} cat={cat} max_kp_conf={max_c:.2f}",
+            cv2.putText(vis,
+                        f"svo_frame={fi+frame_offset} (proc {fi}) "
+                        f"cat={cat} max_kp_conf={max_c:.2f}",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-            png = out_dir / f"diag_frame_{fi:04d}.png"
+            png = out_dir / f"diag_frame_{fi+frame_offset:04d}.png"
             cv2.imwrite(str(png), vis)
             dumped_frames += 1
 
