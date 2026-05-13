@@ -685,16 +685,32 @@ class Pipeline:
                 ]
                 q_rad = np.array([_math.radians(d) for d in q_deg], dtype=np.float64)
                 # σ per joint — fresh = 0.05 rad (~3°). Held-via-depth_hold
-                # joints get inflated σ = 0.20 rad (~11°) so the EKF down-
-                # weights them rather than treating a stale ankle as a fresh
-                # ankle (Codex consult #7). KEYPOINT_ORDER_6 maps directly:
-                #   q[0..2] ← left  hip / knee / ankle
-                #   q[3..5] ← right hip / knee / ankle
+                # keypoints get inflated σ on EVERY derived angle that uses
+                # the held keypoint, not just the i-th angle (Codex follow-up
+                # P2: a held ankle affects both knee_flexion and shank_inc;
+                # a held knee affects thigh_inc, knee_flexion, shank_inc).
+                #
+                # Angle index map (matches q_deg ordering above):
+                #   q[0] = left  thigh_inc  ← uses left_hip, left_knee
+                #   q[1] = left  knee_flex  ← uses left_hip, left_knee, left_ankle
+                #   q[2] = left  shank_inc  ← uses left_knee, left_ankle
+                #   q[3] = right thigh_inc  ← uses right_hip, right_knee
+                #   q[4] = right knee_flex  ← uses right_hip, right_knee, right_ankle
+                #   q[5] = right shank_inc  ← uses right_knee, right_ankle
+                _KP_AFFECTS_ANGLES = {
+                    'left_hip':    (0, 1),
+                    'left_knee':   (0, 1, 2),
+                    'left_ankle':  (1, 2),
+                    'right_hip':   (3, 4),
+                    'right_knee':  (3, 4, 5),
+                    'right_ankle': (4, 5),
+                }
                 sigma_per_joint = np.full(6, 0.05, dtype=np.float64)
                 if self.depth_hold is not None and self._last_hold_status:
-                    for i, kp in enumerate(KEYPOINT_ORDER_6):
-                        if self._last_hold_status.get(kp) == 'held':
-                            sigma_per_joint[i] = 0.20
+                    for kp, status in self._last_hold_status.items():
+                        if status == 'held':
+                            for ai in _KP_AFFECTS_ANGLES.get(kp, ()):
+                                sigma_per_joint[ai] = 0.20
 
                 # Codex consult #5 / Phase 2B — Plan D Hilbert envelope expects
                 # hip VERTICAL motion (gravity axis). Previously this fed

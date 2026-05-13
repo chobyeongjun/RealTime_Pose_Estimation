@@ -96,10 +96,27 @@ def run(session: dict, verbose: bool = True) -> dict:
     # is `hip_z_world_m`, which (Codex consult #5) is actually ZED Z =
     # horizontal distance, not vertical. Plan D will struggle on v1 data;
     # warn so users know to re-record with v2.
+    # Codex follow-up P2: v2 dumps from Method A recordings carry
+    # hip_vertical_m = NaN (no world_up). Detect and fall back to ZED Z so
+    # Hilbert does not silently reject every sample.
     if schema >= 2 and "hip_vertical_m" in session:
-        hip_z = session["hip_vertical_m"]
-        if verbose:
-            print(f"[schema v{schema}] hip signal = hip_vertical_m (world-up projection)")
+        candidate = np.asarray(session["hip_vertical_m"])
+        finite_ratio = float(np.isfinite(candidate).mean()) if candidate.size else 0.0
+        if finite_ratio >= 0.10:
+            hip_z = candidate
+            if verbose:
+                print(
+                    f"[schema v{schema}] hip signal = hip_vertical_m "
+                    f"(world-up projection; finite={finite_ratio*100:.1f}%)"
+                )
+        else:
+            hip_z = session["hip_z_world_m"]
+            if verbose:
+                print(
+                    f"[schema v{schema}] hip_vertical_m mostly NaN "
+                    f"({finite_ratio*100:.1f}% finite) — Method A recording? "
+                    f"Falling back to hip_z_world_m (ZED Z, horizontal distance)."
+                )
     else:
         hip_z = session["hip_z_world_m"]
         if verbose:
