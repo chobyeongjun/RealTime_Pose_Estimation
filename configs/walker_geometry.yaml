@@ -1,0 +1,35 @@
+# Walker geometry & cable calibration (per-build configuration)
+# Used by scripts/cable_kinematics.py and (later) cpp/include/hwalker/sheath_geometry.hpp.
+#
+# Frame convention:
+#   Origin = ZED X Mini optical center (camera frame).
+#   X axis = right (image +x).
+#   Y axis = down (image +y, OpenCV / ZED IMU world Y is up).
+#   Z axis = forward (optical axis, away from camera toward user).
+#
+# All distances in meters. Measured once at build time + re-zeroed per session.
+
+# Bowden cable mechanics
+r_pulley_m: 0.0125          # AK60 output pulley radius. ⚠️ MEASURE physically (currently 12.5 mm placeholder)
+sheath_internal_length_m: 0.85   # ⚠️ MEASURE (sheath does not change length in compression)
+
+# Sheath exit points (walker frame, where cable leaves the rigid sheath and becomes free)
+# These are the physical "cable anchor" points in the user's "anchor에서 나오는 그 케이블 시작위치".
+# ⚠️ MEASURE for each walker build.
+P_anchor_left_m:  [0.18, -0.05, 0.10]    # 18 cm right of camera, 5 cm above, 10 cm in front
+P_anchor_right_m: [-0.18, -0.05, 0.10]   # mirror
+
+# Shank attach point on user
+# Approximated as a point along the knee→ankle line.
+#   alpha = 0.5 → midshank
+#   alpha = 0.7 → ankle-side (default; matches typical harness band)
+#   alpha = 0.3 → knee-side
+shank_attach_alpha: 0.70
+
+# Pretension calibration (sets the "no slack" reference)
+pretension_force_N: 5.0       # User's "5N 팽팽하게 당기는" reference
+
+# Slack margin in cable length (positive = let cable hang slightly slack, 0 = taut)
+# Per Codex consult #11 and user's algorithm: keep slightly negative so the cable
+# is always taut during stance (no jerk on HS).
+slack_margin_m: -0.005        # -5 mm under-extend during runtime tracking
