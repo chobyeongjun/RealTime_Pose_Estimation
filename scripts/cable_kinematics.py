@@ -250,14 +250,16 @@ def trace_from_npz(
 
     # Approximate knee/ankle 3D in camera frame (very rough).
     # Camera-frame X is lateral, Y is down, Z is forward (= horizontal distance).
+    # NPZ stores joint angles already in RADIANS (left_hip_rad / left_knee_rad
+    # — Codex P2). Do NOT re-convert.
     side_x = 0.10 if side_upper == "L" else -0.10
     knee_x = np.full(n, side_x, dtype=np.float64)
     knee_y = np.full(n, 0.50, dtype=np.float64)          # rough hip Y in cam
-    knee_z = hip_z + THIGH_LEN_M * np.cos(np.deg2rad(hip_rad))   # forward
+    knee_z = hip_z + THIGH_LEN_M * np.cos(hip_rad)        # forward
     # shank attach (alpha along knee→ankle, ankle assumed below knee)
     ankle_x = knee_x
     ankle_y = knee_y + SHANK_LEN_M    # below knee in camera Y (down)
-    ankle_z = knee_z + SHANK_LEN_M * np.cos(np.deg2rad(hip_rad - knee_rad))
+    ankle_z = knee_z + SHANK_LEN_M * np.cos(hip_rad - knee_rad)
 
     knee_3d = np.column_stack([knee_x, knee_y, knee_z])
     ankle_3d = np.column_stack([ankle_x, ankle_y, ankle_z])
