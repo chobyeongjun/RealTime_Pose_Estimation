@@ -63,7 +63,10 @@ echo "" | tee -a "$SUMMARY"
 # ─── Phase 1: Unit tests ────────────────────────────────────────────────
 note "[1/7] Unit tests (pytest)"
 PYTEST_LOG="$LOG_DIR/01_pytest.log"
+# Disable anyio plugin (Jetson pytest is older than anyio expects → ImportError).
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 PYTHONPATH=src:src/perception/benchmarks python3 -m pytest \
+    -p no:cacheprovider \
     tests/test_phase_b_integration.py \
     tests/test_teensy_protocol.py \
     tests/test_bridge_flow.py \
