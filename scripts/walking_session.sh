@@ -59,17 +59,20 @@ echo "  녹화 path: $SVO_PATH"
 echo ""
 read -p "  walking 준비 됐으면 Enter 누르세요... " _
 
+# Headless-safe: use Python ZED SDK directly. ZED_Explorer is a Qt GUI app
+# and crashes over SSH (qt.qpa.xcb: could not connect to display).
 if command -v ZED_Recorder >/dev/null 2>&1; then
-    # ZED Recorder CLI (ZED SDK 의무 *진정 *path)
-    timeout "${DURATION_S}" ZED_Recorder "$SVO_PATH" --resolution VGA --fps 60 \
+    # Prefer ZED_Recorder CLI if available (some SDK installs include it).
+    timeout "${DURATION_S}" ZED_Recorder "$SVO_PATH" --resolution SVGA --fps 120 \
         2>&1 | sed 's/^/  /' || true
-elif command -v ZED_Explorer >/dev/null 2>&1; then
-    echo "  ${YELLOW}NOTE: ZED_Explorer 실행 — Record 탭 + Start Recording${NC}"
-    echo "  녹화 path 직접 지정: $SVO_PATH"
-    echo "  ${DURATION_S}초 후 Stop + ZED_Explorer 종료"
-    ZED_Explorer
+elif python3 -c "import pyzed.sl" 2>/dev/null; then
+    echo "  Using headless Python recorder (pyzed.sl)"
+    python3 scripts/zed_svo_record.py "$SVO_PATH" \
+        --duration "$DURATION_S" --resolution SVGA --fps 120 \
+        2>&1 | sed 's/^/  /' || true
 else
-    echo -e "  ${RED}ERROR: ZED_Recorder/ZED_Explorer 없음. ZED SDK 의무 설치.${NC}"
+    echo -e "  ${RED}ERROR: ZED_Recorder CLI 도 없고 pyzed.sl 도 import 안 됨.${NC}"
+    echo "  pyzed 설치: cd /usr/local/zed && python3 get_python_api.py"
     exit 1
 fi
 
