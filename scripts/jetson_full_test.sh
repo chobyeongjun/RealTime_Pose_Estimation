@@ -96,38 +96,64 @@ fi
 echo ""
 
 # ─── Phase 3: Pipeline boot ─────────────────────────────────────────────
-note "[3/7] Pipeline boot 30s with --enable-shm-v2 --enable-plan-d"
+note "[3/7] Pipeline boot with --enable-shm-v2 --enable-plan-d"
 PIPELINE_LOG="$LOG_DIR/03_pipeline.log"
-PYTHONPATH=src:src/perception/benchmarks timeout 30 python3 \
+# No external timeout — we manage pipeline lifecycle explicitly so the SHM
+# stays alive through Phase 4 + 5 (dump_shm + bridge mock).
+PYTHONPATH=src:src/perception/benchmarks python3 \
     src/perception/realtime/pipeline_main.py \
     --no-display --method B \
     --enable-shm-v2 --enable-plan-d \
     > "$PIPELINE_LOG" 2>&1 &
 PIPE_PID=$!
 
-# Give it 8s to warm up (engine load + camera init)
-sleep 8
-if ! ps -p $PIPE_PID > /dev/null 2>&1; then
-    fail "pipeline died during warmup — tail of log:"
-    tail -20 "$PIPELINE_LOG"
+# Wait until SHM appears (engine load + camera init = ~10-15s on Orin NX).
+# Poll up to 30s; abort if SHM never appears OR pipeline dies first.
+SHM_OK=0
+for i in $(seq 1 60); do
+    if ! ps -p $PIPE_PID > /dev/null 2>&1; then
+        fail "pipeline died during warmup (after ${i}/2s) — tail of log:"
+        tail -30 "$PIPELINE_LOG"
+        exit 1
+    fi
+    if [ -e /dev/shm/hwalker_pose_v2 ] && [ -e /dev/shm/hwalker_forecast ]; then
+        SHM_OK=1
+        pass "pipeline running (pid=$PIPE_PID) — SHM ready after $(echo "scale=1; $i/2" | bc)s"
+        break
+    fi
+    sleep 0.5
+done
+if [ "$SHM_OK" -ne 1 ]; then
+    fail "SHM did not appear within 30s — tail of pipeline log:"
+    tail -30 "$PIPELINE_LOG"
+    kill -SIGTERM $PIPE_PID 2>/dev/null || true
     exit 1
 fi
-pass "pipeline running (pid=$PIPE_PID)"
 
 # ─── Phase 4: SHM layout dump (5s watch) ────────────────────────────────
 note "[4/7] dump_shm 5s watch — /hwalker_pose_v2 + /hwalker_forecast"
 DUMP_LOG="$LOG_DIR/04_dump_shm.log"
-PYTHONPATH=src python3 scripts/dump_shm.py --watch 5 --rate 5 \
-    > "$DUMP_LOG" 2>&1 && pass "SHM layout sane" || fail "SHM layout issues — $DUMP_LOG"
+# Verify pipeline is still alive before reading SHM.
+if ! ps -p $PIPE_PID > /dev/null 2>&1; then
+    fail "pipeline died before dump_shm — SHM gone — see $PIPELINE_LOG"
+else
+    PYTHONPATH=src python3 scripts/dump_shm.py --watch 5 --rate 5 \
+        > "$DUMP_LOG" 2>&1 && pass "SHM layout sane" || fail "SHM layout issues — $DUMP_LOG"
+fi
 echo ""
 
 # ─── Phase 5: bridge --mock ──────────────────────────────────────────────
 note "[5/7] shm_to_teensy_bridge --mock 10s — forecast → frame emission"
 BRIDGE_LOG="$LOG_DIR/05_bridge_mock.log"
-PYTHONPATH=src python3 scripts/shm_to_teensy_bridge.py \
-    --mock --duration 10 --rate-hz 200 --verbose \
-    > "$BRIDGE_LOG" 2>&1
-if grep -q "cmds_sent" "$BRIDGE_LOG"; then
+if ! ps -p $PIPE_PID > /dev/null 2>&1; then
+    fail "pipeline died before bridge test — see $PIPELINE_LOG"
+    BRIDGE_LOG=""
+else
+    PYTHONPATH=src python3 scripts/shm_to_teensy_bridge.py \
+        --mock --duration 10 --rate-hz 200 --verbose \
+        > "$BRIDGE_LOG" 2>&1
+fi
+if [ -n "$BRIDGE_LOG" ] && grep -q "cmds_sent" "$BRIDGE_LOG"; then
     CMDS=$(grep -oP "cmds_sent: \K\d+" "$BRIDGE_LOG" | tail -1)
     HBS=$(grep -oP "heartbeats_sent: \K\d+" "$BRIDGE_LOG" | tail -1)
     pass "bridge mock: ${CMDS} commands + ${HBS} heartbeats over 10s"
