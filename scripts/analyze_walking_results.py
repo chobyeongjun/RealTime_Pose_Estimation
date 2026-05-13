@@ -6,51 +6,74 @@ SSH 환경에서 검증 가능한 형태로 결과를 출력:
   - PNG plots (matplotlib agg backend — no display)
   - Markdown 요약 (paste-friendly)
 
+Schema mirrors pipeline_main.py exactly (Codex review 5bd5732 P2-1/2/3):
+  NPZ keys: t_s, hip_z_world_m, left_hip_z, right_hip_z,
+            left_knee_rad, right_knee_rad, left_hip_rad, right_hip_rad,
+            valid, method
+  Trace columns (mixed units!):
+    frame_id            int
+    t0_mono_ns          int    (Python perf_counter * 1e9, ns scale)
+    t1_fetch_done_perf  float  (perf_counter seconds)
+    t2_predict_done     float  (perf_counter seconds)
+    t3_depth3d_done     float  (perf_counter seconds)
+    t4_publish_done_mono_ns  int (monotonic_ns)
+    interval_ms         float
+    valid               int
+    preprocess_ms       float
+    infer_ms            float
+    postprocess_ms      float
+
 Usage:
     python3 scripts/analyze_walking_results.py recordings/walking_YYYYMMDD_HHMMSS/
-
-또는 명시 path:
-    python3 scripts/analyze_walking_results.py \\
-        --npz path/to.npz --trace path/to_trace.csv --plan-d path/to_plan_d.log
 """
 from __future__ import annotations
 
 import argparse
 import csv
-import glob
 import json
-import os
 import re
 import sys
 from pathlib import Path
-from typing import Optional
 
-# Headless matplotlib — must be set before pyplot import.
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-JOINT_NAMES = ['L_hip', 'L_knee', 'L_ankle', 'R_hip', 'R_knee', 'R_ankle']
-
 
 def find_files(session_dir: Path) -> dict:
-    """Auto-discover npz/csv/log files in a walking_session output directory."""
+    """Auto-discover npz/csv/log files. Codex P2-1 fix: include replay_*."""
     paths = {}
-    for key, pattern in [
-        ('npz',    'walking_*.npz'),
-        ('trace',  'trace_*.csv'),
-        ('plan_d', 'plan_d_*.log'),
-        ('analyze', 'analyze_*.txt'),
-        ('svo',    'walking_*.svo2'),
-    ]:
-        hits = list(session_dir.glob(pattern))
+    candidates = {
+        'npz': [
+            'walking_*.npz',
+            'replay_*.npz',
+            '*_pose.npz',
+        ],
+        'trace': [
+            'trace_*.csv',
+            'replay_*_trace.csv',
+            '*_trace.csv',
+        ],
+        'plan_d': [
+            'plan_d_*.log',
+            'replay_*.log',
+        ],
+        'svo': [
+            'walking_*.svo2',
+        ],
+    }
+    for key, patterns in candidates.items():
+        hits = []
+        for p in patterns:
+            hits.extend(session_dir.glob(p))
+        # de-dup, sort by mtime newest-first
+        hits = sorted(set(hits), key=lambda x: x.stat().st_mtime, reverse=True) if hits else []
         paths[key] = hits[0] if hits else None
     return paths
 
 
 def stats_summary(arr: np.ndarray) -> dict:
-    """Common percentile + NaN stats for a numeric array."""
     if arr.size == 0:
         return {"count": 0}
     finite = arr[np.isfinite(arr)]
@@ -71,178 +94,206 @@ def stats_summary(arr: np.ndarray) -> dict:
 
 
 def analyze_npz(path: Path, out_dir: Path) -> dict:
-    """Pose npz: 6 keypoints × N frames. Compute coverage, σ, joint trajectories."""
+    """Pose dump: pipeline_main.py:1081 schema (joint angles, NOT 3D keypoints)."""
     if path is None or not path.exists():
         return {"present": False}
     data = np.load(path, allow_pickle=True)
     keys = list(data.keys())
     result = {"present": True, "path": str(path), "keys": keys}
 
-    # Expected fields (vary by recorder version)
-    if 'kpts_3d' in data:
-        kpts = data['kpts_3d']   # (N, K, 3)
-        N, K, _ = kpts.shape
-        result["frames"] = N
-        result["K"] = K
-        result["valid_per_joint"] = []
-        for i in range(K):
-            xyz = kpts[:, i, :]
-            mask = np.all(np.isfinite(xyz), axis=1)
-            result["valid_per_joint"].append({
-                "name":  JOINT_NAMES[i] if i < len(JOINT_NAMES) else f"j{i}",
-                "valid_ratio": float(mask.sum() / N),
-                "z_mean": float(np.nanmean(xyz[:, 2])),
-                "z_std":  float(np.nanstd(xyz[:, 2])),
-            })
+    if 't_s' not in data:
+        result["error"] = f"unexpected schema; keys = {keys}"
+        return result
 
-        # Plot z-trajectory per joint
-        fig, axes = plt.subplots(K, 1, figsize=(10, 2*K), sharex=True)
-        if K == 1:
-            axes = [axes]
-        for i in range(K):
-            z = kpts[:, i, 2]
-            axes[i].plot(z, lw=0.6)
-            axes[i].set_ylabel(f"{JOINT_NAMES[i] if i < 6 else f'j{i}'}\nZ (m)")
-            axes[i].grid(alpha=0.3)
-        axes[-1].set_xlabel("frame")
-        fig.suptitle(f"Keypoint Z trajectory ({path.name})", fontsize=10)
+    t_s = data['t_s']
+    valid = data['valid'] if 'valid' in data else np.ones_like(t_s, dtype=bool)
+    duration_s = float(t_s[-1] - t_s[0]) if t_s.size > 1 else 0.0
+    fps = float((t_s.size - 1) / duration_s) if duration_s > 0 else 0.0
+    result.update({
+        "frames":      int(t_s.size),
+        "duration_s":  duration_s,
+        "fps":         fps,
+        "valid_ratio": float(valid.sum() / max(valid.size, 1)),
+        "method":      str(data['method']) if 'method' in data else None,
+    })
+
+    joint_fields = ['left_hip_rad', 'right_hip_rad',
+                    'left_knee_rad', 'right_knee_rad',
+                    'left_hip_z', 'right_hip_z', 'hip_z_world_m']
+    result["joints"] = {}
+    for name in joint_fields:
+        if name in data:
+            arr = np.asarray(data[name], dtype=np.float64)
+            result["joints"][name] = stats_summary(arr)
+
+    # Plot joint angles
+    angle_keys = ['left_hip_rad', 'left_knee_rad', 'right_hip_rad', 'right_knee_rad']
+    present = [k for k in angle_keys if k in data]
+    if present:
+        fig, axes = plt.subplots(len(present), 1, figsize=(11, 2.2*len(present)), sharex=True)
+        if len(present) == 1: axes = [axes]
+        for ax, k in zip(axes, present):
+            y = np.asarray(data[k], dtype=np.float64)
+            ax.plot(t_s, np.degrees(y), lw=0.7)
+            ax.set_ylabel(f"{k}\n(°)")
+            ax.grid(alpha=0.3)
+        axes[-1].set_xlabel("t (s)")
+        fig.suptitle(f"Joint angles ({path.name})", fontsize=10)
         plt.tight_layout()
-        png = out_dir / "kpts_3d_z.png"
-        fig.savefig(png, dpi=100)
-        plt.close(fig)
-        result["plot_kpts_3d_z"] = str(png)
+        png = out_dir / "joint_angles_deg.png"
+        fig.savefig(png, dpi=100); plt.close(fig)
+        result["plot_joint_angles"] = str(png)
+
+    # Plot hip z (vertical) trajectories — gait cycle proxy
+    if 'hip_z_world_m' in data:
+        fig, ax = plt.subplots(figsize=(11, 3))
+        ax.plot(t_s, data['hip_z_world_m'], lw=0.6, label='hip_z_world_m')
+        ax.set_xlabel("t (s)"); ax.set_ylabel("hip Z (m)")
+        ax.set_title("Hip vertical trajectory — gait cycle proxy")
+        ax.grid(alpha=0.3); ax.legend()
+        plt.tight_layout()
+        png = out_dir / "hip_z_trajectory.png"
+        fig.savefig(png, dpi=100); plt.close(fig)
+        result["plot_hip_z"] = str(png)
 
     return result
 
 
-def analyze_trace(path: Path, out_dir: Path) -> dict:
-    """Trace CSV: per-frame T0~T9 stage timestamps in monotonic_ns.
+def _to_seconds(name: str, raw: list) -> np.ndarray:
+    """Codex P2-3 fix: pipeline_main writes mixed units in trace CSV.
 
-    Output: latency histogram + per-stage p50/p99.
+    *_mono_ns / *_perf_ns / *_ns columns are nanosecond ints.
+    *_perf columns (no _ns suffix) are float seconds from perf_counter().
     """
+    arr = np.full(len(raw), np.nan, dtype=np.float64)
+    is_ns = name.endswith('_ns')
+    for i, v in enumerate(raw):
+        try:
+            x = float(v)
+        except (ValueError, TypeError):
+            continue
+        arr[i] = (x * 1e-9) if is_ns else x
+    return arr
+
+
+def analyze_trace(path: Path, out_dir: Path) -> dict:
     if path is None or not path.exists():
         return {"present": False}
-    rows = []
     with open(path) as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            rows.append(r)
+        rows = list(csv.DictReader(f))
     if not rows:
         return {"present": True, "path": str(path), "rows": 0, "empty": True}
 
     fields = list(rows[0].keys())
-    # Try to find time-stage columns named T0, T1, ... or similar
-    t_cols = [c for c in fields if re.match(r"^[Tt]\d", c)]
     result = {"present": True, "path": str(path), "rows": len(rows), "fields": fields}
 
-    if not t_cols:
+    # Identify stage columns by order they appear in fieldnames
+    stage_cols = [c for c in fields if re.match(r"^t\d", c, re.IGNORECASE)]
+    if not stage_cols:
         return result
 
-    # Convert to arrays of ns
-    stages = {}
-    for c in t_cols:
-        vals = []
-        for r in rows:
-            try:
-                vals.append(int(r[c]))
-            except (ValueError, TypeError):
-                vals.append(np.nan)
-        stages[c] = np.array(vals, dtype=float)
+    # Normalize to seconds (mixed units!)
+    stage_arrays = {c: _to_seconds(c, [r[c] for r in rows]) for c in stage_cols}
 
-    # Latency = T_last - T_first
-    t_keys = sorted(stages.keys(), key=lambda k: int(re.search(r"\d+", k).group()))
-    t_first = stages[t_keys[0]]
-    t_last  = stages[t_keys[-1]]
-    e2e_ms = (t_last - t_first) / 1e6
-    result["e2e_ms"] = stats_summary(e2e_ms)
+    # E2E = last_stage - first_stage (seconds)
+    first, last = stage_cols[0], stage_cols[-1]
+    e2e_s = stage_arrays[last] - stage_arrays[first]
+    result["e2e_ms"] = stats_summary(e2e_s * 1000.0)
 
-    # Per-stage delta
+    # Per-stage deltas
     deltas = {}
-    for i in range(1, len(t_keys)):
-        d_ms = (stages[t_keys[i]] - stages[t_keys[i-1]]) / 1e6
-        deltas[f"{t_keys[i-1]}_to_{t_keys[i]}"] = stats_summary(d_ms)
+    for i in range(1, len(stage_cols)):
+        d_ms = (stage_arrays[stage_cols[i]] - stage_arrays[stage_cols[i-1]]) * 1000.0
+        deltas[f"{stage_cols[i-1]} → {stage_cols[i]}"] = stats_summary(d_ms)
     result["stage_deltas_ms"] = deltas
 
-    # Plot histogram
-    fig, ax = plt.subplots(figsize=(8, 4))
-    finite = e2e_ms[np.isfinite(e2e_ms)]
-    if finite.size > 0:
-        ax.hist(finite, bins=50, edgecolor='black', alpha=0.7)
-        ax.axvline(np.percentile(finite, 50), color='g', ls='--', label=f'p50={np.percentile(finite, 50):.1f}ms')
-        ax.axvline(np.percentile(finite, 99), color='r', ls='--', label=f'p99={np.percentile(finite, 99):.1f}ms')
+    # interval_ms column (already in ms per pipeline_main)
+    if 'interval_ms' in fields:
+        intv = np.array([float(r['interval_ms']) if r['interval_ms'] not in ('', None) else np.nan
+                         for r in rows])
+        result["interval_ms"] = stats_summary(intv)
+
+    # Histogram
+    finite = result["e2e_ms"]
+    if finite.get("finite", 0) > 0:
+        e2e_ms_arr = e2e_s * 1000.0
+        finite_arr = e2e_ms_arr[np.isfinite(e2e_ms_arr)]
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.hist(finite_arr, bins=50, edgecolor='black', alpha=0.7)
+        ax.axvline(np.percentile(finite_arr, 50), color='g', ls='--',
+                   label=f'p50={np.percentile(finite_arr, 50):.1f}ms')
+        ax.axvline(np.percentile(finite_arr, 99), color='r', ls='--',
+                   label=f'p99={np.percentile(finite_arr, 99):.1f}ms')
         ax.axvline(20.0, color='k', ls=':', label='HARD LIMIT 20ms')
-        ax.set_xlabel("E2E latency (ms)")
-        ax.set_ylabel("frames")
-        ax.set_title(f"End-to-end latency distribution ({path.name})")
-        ax.legend()
-        ax.grid(alpha=0.3)
+        ax.set_xlabel("E2E latency (ms)"); ax.set_ylabel("frames")
+        ax.set_title(f"E2E latency dist ({path.name})")
+        ax.legend(); ax.grid(alpha=0.3)
         plt.tight_layout()
         png = out_dir / "e2e_latency_hist.png"
-        fig.savefig(png, dpi=100)
+        fig.savefig(png, dpi=100); plt.close(fig)
         result["plot_latency_hist"] = str(png)
-    plt.close(fig)
 
     return result
 
 
 def analyze_plan_d(path: Path) -> dict:
-    """Parse plan_d.log for cascade transitions + stride count + sigma."""
     if path is None or not path.exists():
         return {"present": False}
     with open(path) as f:
         text = f.read()
-
     result = {"present": True, "path": str(path), "size_bytes": len(text)}
-
-    # Cascade L1→L2 / L2→L3 transitions
     transitions = re.findall(r"cascade.*L(\d).*L(\d)", text)
     result["cascade_transitions"] = [{"from": int(a), "to": int(b)} for a, b in transitions]
-
-    # Stride count
     strides = re.findall(r"stride[_ ]count[:\s=]+(\d+)", text)
     if strides:
         result["max_stride_count"] = max(int(s) for s in strides)
-
-    # is_ready True ratio (rough)
     ready_true = len(re.findall(r"is_ready.*True", text))
     ready_false = len(re.findall(r"is_ready.*False", text))
     total = ready_true + ready_false
     if total > 0:
         result["is_ready_true_ratio"] = ready_true / total
-
-    # Errors / warnings
     result["error_lines"]   = len(re.findall(r"\b(ERROR|Traceback)\b", text, re.IGNORECASE))
     result["warning_lines"] = len(re.findall(r"\bWARN\b", text, re.IGNORECASE))
-
     return result
 
 
 def emit_markdown(stats: dict, out_path: Path) -> str:
-    """Generate paste-friendly Markdown summary."""
     lines = []
     lines.append(f"# Walking session analysis — {stats.get('session_dir', '')}\n")
 
     npz = stats.get("npz", {})
     if npz.get("present"):
-        lines.append(f"## Pose npz ({npz.get('frames', '?')} frames × {npz.get('K', '?')} kpts)")
-        for j in npz.get("valid_per_joint", []):
-            lines.append(f"- {j['name']:8s}  valid={j['valid_ratio']*100:5.1f}%  "
-                         f"Z={j['z_mean']:+.2f}±{j['z_std']:.2f} m")
-        if "plot_kpts_3d_z" in npz:
-            lines.append(f"\nPlot → `{npz['plot_kpts_3d_z']}`")
+        if "error" in npz:
+            lines.append(f"## Pose npz — schema error: {npz['error']}")
+        else:
+            lines.append(f"## Pose dump ({npz.get('frames', '?')} frames, "
+                         f"{npz.get('duration_s', 0):.1f}s, {npz.get('fps', 0):.1f}Hz)")
+            lines.append(f"- valid ratio: {npz.get('valid_ratio', 0)*100:.1f}%")
+            lines.append(f"- method: {npz.get('method')}")
+            for jname, jstat in npz.get("joints", {}).items():
+                if "p50" in jstat:
+                    lines.append(f"- {jname:18s}: p50={jstat['p50']:+.3f}  "
+                                 f"p99={jstat['p99']:+.3f}  std={jstat['std']:.3f}")
+            for k in ("plot_joint_angles", "plot_hip_z"):
+                if k in npz:
+                    lines.append(f"\n→ `{npz[k]}`")
     else:
-        lines.append("## Pose npz — **MISSING** (pipeline did not produce keypoint output)")
+        lines.append("## Pose dump — **MISSING** (pipeline did not produce npz)")
 
     tr = stats.get("trace", {})
     lines.append("\n## RT trace")
     if tr.get("present") and not tr.get("empty"):
         e2e = tr.get("e2e_ms", {})
-        lines.append(f"- rows: {tr.get('rows', 0)}")
-        lines.append(f"- e2e p50/p95/p99 (ms): {e2e.get('p50', 'NA'):.2f} / "
-                     f"{e2e.get('p95', 'NA'):.2f} / {e2e.get('p99', 'NA'):.2f}")
-        lines.append(f"- e2e max (ms): {e2e.get('max', 'NA'):.2f}")
+        if "p50" in e2e:
+            lines.append(f"- rows: {tr.get('rows', 0)}")
+            lines.append(f"- e2e p50/p95/p99 (ms): {e2e['p50']:.2f} / {e2e['p95']:.2f} / {e2e['p99']:.2f}")
+            lines.append(f"- e2e max (ms): {e2e['max']:.2f}")
+            lines.append(f"- HARD LIMIT 20ms 위반: {(e2e['max'] > 20)}")
+        if "interval_ms" in tr and "p50" in tr["interval_ms"]:
+            iv = tr["interval_ms"]
+            lines.append(f"- interval p50/p95 (ms): {iv['p50']:.2f} / {iv['p95']:.2f}")
         if "plot_latency_hist" in tr:
-            lines.append(f"- plot → `{tr['plot_latency_hist']}`")
+            lines.append(f"\n→ `{tr['plot_latency_hist']}`")
     else:
         lines.append("- trace CSV **empty or missing**")
 
@@ -260,20 +311,17 @@ def emit_markdown(stats: dict, out_path: Path) -> str:
         lines.append("- plan_d log MISSING")
 
     md = "\n".join(lines) + "\n"
-    with open(out_path, "w") as f:
-        f.write(md)
+    out_path.write_text(md)
     return md
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("session_dir", nargs="?", default=None,
-                    help="walking_YYYYMMDD_HHMMSS directory")
+    ap.add_argument("session_dir", nargs="?", default=None)
     ap.add_argument("--npz", default=None)
     ap.add_argument("--trace", default=None)
     ap.add_argument("--plan-d", default=None)
-    ap.add_argument("--out-dir", default=None,
-                    help="Where to write PNG/MD/JSON (default: session_dir)")
+    ap.add_argument("--out-dir", default=None)
     args = ap.parse_args()
 
     if args.session_dir:
@@ -312,13 +360,14 @@ def main():
 
     md = emit_markdown(stats, out_dir / "analysis.md")
     print(md)
-    print(f"\n=== Outputs ===")
+    print(f"=== Outputs ===")
     print(f"  JSON     : {json_path}")
     print(f"  Markdown : {out_dir / 'analysis.md'}")
-    if "plot_kpts_3d_z" in stats["npz"]:
-        print(f"  PNG kpts : {stats['npz']['plot_kpts_3d_z']}")
+    for k in ("plot_joint_angles", "plot_hip_z"):
+        if k in stats["npz"]:
+            print(f"  {k:18s}: {stats['npz'][k]}")
     if "plot_latency_hist" in stats["trace"]:
-        print(f"  PNG latcy: {stats['trace']['plot_latency_hist']}")
+        print(f"  plot_latency_hist : {stats['trace']['plot_latency_hist']}")
 
 
 if __name__ == "__main__":
