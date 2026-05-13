@@ -83,7 +83,8 @@ inline float uint_to_float(uint16_t v, float x_min, float x_max, int bits) {
 }
 
 inline bool unpack_status(const uint8_t* data, uint8_t dlc, MotorStatus& s) {
-    if (dlc < 5) return false;
+    // Codex P2: function reads data[0..5] (6 bytes). dlc < 6 must reject.
+    if (dlc < 6) return false;
     s.id = data[0];
     uint16_t p_int = (static_cast<uint16_t>(data[1]) << 8) | data[2];
     uint16_t v_int = (static_cast<uint16_t>(data[3]) << 4) | (data[4] >> 4);

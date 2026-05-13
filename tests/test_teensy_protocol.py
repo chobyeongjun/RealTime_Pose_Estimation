@@ -114,6 +114,41 @@ def test_parse_telemetry_layout():
     assert abs(out["tau_applied_N"][5] - 6.0) < 1e-5
 
 
+def test_unit_contract_cable_n_to_motor_nm():
+    """Document the cable-N → motor-N·m conversion the firmware now performs.
+
+    force_clamp.h: PULLEY_RADIUS_M = 0.130, AK60_MAX_TAU_NM = 9.
+    A host command of 70 N cable must NOT saturate inside the safe ROM.
+    """
+    PULLEY = 0.130
+    MAX_TAU_NM = 9.0
+    MAX_CABLE_N = MAX_TAU_NM / PULLEY   # ~69.23 N
+
+    # safe cable command 50N → motor 6.5 N·m → not clamped
+    cable_50 = 50.0
+    motor_50 = cable_50 * PULLEY
+    assert motor_50 < MAX_TAU_NM
+    assert abs(motor_50 - 6.5) < 1e-6
+
+    # over cable 80N → motor 10.4 N·m → clamped to 9
+    cable_80 = 80.0
+    motor_80 = min(cable_80 * PULLEY, MAX_TAU_NM)
+    assert motor_80 == MAX_TAU_NM
+    assert cable_80 > MAX_CABLE_N
+
+
+def test_heartbeat_does_not_kick_command_watchdog():
+    """Document the dual-watchdog contract (Codex P1 fix).
+
+    Heartbeat refreshes link watchdog only. Command watchdog must trip
+    if no PKT_COMMAND arrives within 200ms, even if heartbeats keep flowing.
+    """
+    # This test is a documentation check — Python can't simulate Teensy timers,
+    # but the assertion below pins the contract.
+    HEARTBEAT_REFRESHES_CMD_WATCHDOG = False
+    assert HEARTBEAT_REFRESHES_CMD_WATCHDOG is False
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))

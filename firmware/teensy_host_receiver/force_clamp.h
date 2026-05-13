@@ -18,9 +18,17 @@
 namespace hw {
 
 // AK60 datasheet (T-Motor) — ⚠️ verify with actual gearbox before deploy.
-// "70N max force" in CLAUDE.md is the cable-side spec; motor side is torque (N·m).
-// We track tau in N·m and convert at the CAN layer.
-inline constexpr float AK60_MAX_TAU_NM      = 9.0f;     // ~70N at 130mm pulley
+// "70N max force" in CLAUDE.md is the CABLE-side spec; motor side is torque (N·m).
+//
+// Unit contract:
+//   host sends tau_ff_N   in CABLE NEWTONS (mechanical force at end-effector)
+//   force_clamp converts  to MOTOR N·m via   tau_Nm = tau_N * PULLEY_RADIUS_M
+//   CAN MIT mode commands MOTOR N·m
+//
+// Cable max 70 N × pulley 130 mm = motor max ~9 N·m.
+inline constexpr float PULLEY_RADIUS_M      = 0.130f;   // ⚠️ verify on physical build
+inline constexpr float AK60_MAX_TAU_NM      = 9.0f;     // = 70 N cable at 130 mm pulley
+inline constexpr float AK60_MAX_TAU_CABLE_N = AK60_MAX_TAU_NM / PULLEY_RADIUS_M;  // ~69.2 N
 inline constexpr float AK60_MAX_SLEW_NM_S   = 25.0f;    // 9 N·m in 360 ms
 inline constexpr float PRETENSION_TAU_NM    = 0.65f;    // ~5N at 130mm pulley
 inline constexpr float MAX_KP_NM_PER_RAD    = 80.0f;
@@ -90,10 +98,12 @@ public:
             float kp = clamp_pos(src->kp_Nm_per_rad[i],    MAX_KP_NM_PER_RAD);
             float kd = clamp_pos(src->kd_Nms_per_rad[i],   MAX_KD_NMS_PER_RAD);
 
-            // host sends tau in Newtons (cable) — convert to N·m at pulley
-            // For now treat as N·m directly; cable conversion done in CAN layer.
-            float want_tau = clamp_abs(src->tau_ff_N[i], AK60_MAX_TAU_NM);
-            if (fabsf(src->tau_ff_N[i]) > AK60_MAX_TAU_NM) reason = CLAMP_TAU_LIMIT;
+            // host sends tau in CABLE NEWTONS — convert to MOTOR N·m via pulley.
+            // (Codex P1: previous code passed cable N straight to CAN as N·m → 7x over-torque.)
+            const float requested_cable_N = src->tau_ff_N[i];
+            const float requested_tau_Nm  = requested_cable_N * PULLEY_RADIUS_M;
+            float want_tau = clamp_abs(requested_tau_Nm, AK60_MAX_TAU_NM);
+            if (fabsf(requested_cable_N) > AK60_MAX_TAU_CABLE_N) reason = CLAMP_TAU_LIMIT;
 
             // Slew limit
             float prev = prev_tau_[i];

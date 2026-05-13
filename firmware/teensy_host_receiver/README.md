@@ -82,6 +82,13 @@ Joint 순서 = `KEYPOINT_ORDER_6` (pipeline_main.py):
 `recv_mono_us` 와 `host_tx_mono_ns/1000` 차이 = **RT metric A (sensor freshness at Teensy)**.
 `can_tx_mono_us - recv_mono_us` = **RT metric C (Teensy 내부 지연 T9-T8)**.
 
+## Unit contract (단위 변환 매우 중요)
+
+- **host → teensy**: `tau_ff_N` 은 **케이블 뉴턴** (end-effector 힘).
+- **teensy → CAN (AK60)**: `force_clamp` 가 `PULLEY_RADIUS_M = 0.130m` 곱해서 **motor N·m** 로 변환 후 송신.
+- 호스트는 절대 motor N·m 단위로 보내지 말 것. 7배 over-torque 위험.
+- 케이블 한계: 70 N (= 9 N·m at 130mm pulley)
+
 ## 5중 force clamp (force_clamp.h)
 
 순서대로 layer 통과 못 하면 **pretension 0.65 N·m (≈5N at 130mm pulley)** 로 fallback.
@@ -150,6 +157,7 @@ send_command((0,)*6)
 - CRC16-CCITT는 단일 비트 오류 100% 검출이지만 bit-flip burst > 16비트에 약함. 더 강하게 가려면 CRC32로 교체.
 - `STOP` 후에는 host가 재시작 command 보낼 때까지 fallback 유지. 자동 복귀 없음.
 - Cable pulley 반지름 가정 (130mm)이 실제 builds와 다를 수 있음 — 첫 조립 시 재확인.
+- Watchdog **2개 분리**: `g_cmd_wd` (200ms, PKT_COMMAND만 kick — vision freshness gates clamp) + `g_link_wd` (500ms, 모든 frame kick — link liveness telemetry용). 호스트가 heartbeat만 보내고 vision producer 죽으면 cmd_wd 트립 → pretension.
 
 ## 검증된 부분 (Mac compile-time만)
 

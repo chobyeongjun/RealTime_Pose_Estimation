@@ -27,7 +27,13 @@ constexpr uint32_t TELEM_PERIOD_US    = 10000UL;  // 100 Hz telemetry up
 constexpr uint32_t HEARTBEAT_LED_US   = 250000UL; // 4 Hz blink while OK
 constexpr uint32_t STATUS_READ_BUDGET = 6;        // CAN frames per loop
 
-hw::Watchdog                     g_watchdog(/*timeout_us=*/200000UL);
+// Two separate watchdogs (Codex P1):
+//   g_cmd_wd  — kicked ONLY by PKT_COMMAND (vision freshness). Gates force_clamp.
+//   g_link_wd — kicked by any host frame (link liveness). Telemetry only.
+// If host keeps heartbeating but vision producer dies, g_cmd_wd trips at 200ms
+// while g_link_wd stays fresh, so we go to pretension correctly.
+hw::Watchdog                     g_cmd_wd (/*timeout_us=*/200000UL);
+hw::Watchdog                     g_link_wd(/*timeout_us=*/500000UL);
 hw::ForceClamp                   g_clamp;
 hw_proto::CommandBody            g_last_cmd{};
 bool                             g_have_cmd = false;
@@ -47,23 +53,28 @@ bool     g_led_on = false;
 
 // ── Frame callback ─────────────────────────────────────────────────────
 void on_frame(hw_proto::PacketType type, const uint8_t* body, uint16_t len, uint64_t recv_mono_us) {
+    const uint32_t now32 = (uint32_t)(recv_mono_us & 0xFFFFFFFFu);
+    // Every host frame refreshes link watchdog (telemetry/liveness only).
+    g_link_wd.kick(now32);
+
     switch (type) {
         case hw_proto::PKT_COMMAND: {
             if (len != sizeof(hw_proto::CommandBody)) return;
             memcpy(&g_last_cmd, body, sizeof(hw_proto::CommandBody));
             g_have_cmd = true;
-            g_last_recv_us = (uint32_t)(recv_mono_us & 0xFFFFFFFFu);
+            g_last_recv_us = now32;
             g_last_cmd_id  = g_last_cmd.command_id;
-            g_watchdog.kick(g_last_recv_us);
+            // Command watchdog kicks ONLY here — vision freshness, not link.
+            g_cmd_wd.kick(now32);
             break;
         }
         case hw_proto::PKT_HEARTBEAT: {
-            g_watchdog.kick((uint32_t)(recv_mono_us & 0xFFFFFFFFu));
+            // Intentionally does NOT kick g_cmd_wd. If vision dies but host
+            // keeps sending heartbeats, g_cmd_wd trips → pretension.
             break;
         }
         case hw_proto::PKT_STOP: {
-            // Force pretension immediately. Clear last command so clamp picks
-            // CLAMP_FALLBACK_FLAG.
+            // Force pretension immediately. Clamp picks CLAMP_FALLBACK_FLAG.
             g_last_cmd.fallback_active = 1;
             break;
         }
@@ -151,7 +162,8 @@ void loop() {
         const float dt_s = LOOP_PERIOD_US * 1e-6f;
 
         hw::ClampedCommand applied{};
-        const bool wd_tripped = g_watchdog.tripped(loop_t0);
+        // ONLY command watchdog gates the clamp — link watchdog is telemetry-only.
+        const bool wd_tripped = g_cmd_wd.tripped(loop_t0);
         const hw_proto::CommandBody* src = g_have_cmd ? &g_last_cmd : nullptr;
         g_clamp.apply(src, wd_tripped, dt_s, applied);
 
