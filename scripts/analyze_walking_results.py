@@ -41,6 +41,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def _is_pose_dump(npz_path: Path) -> bool:
+    """Validate the NPZ is a pose dump (has t_s + joint angle keys).
+
+    Codex P2-followup: run_plan_d_offline.py writes *_planD_summary.npz
+    in the same directory; it has its own schema and matches the broad
+    walking_*.npz glob but lacks t_s, breaking analyze_npz().
+    """
+    try:
+        with np.load(npz_path, allow_pickle=True) as data:
+            return 't_s' in data and 'left_hip_rad' in data
+    except Exception:
+        return False
+
+
 def find_files(session_dir: Path) -> dict:
     """Auto-discover npz/csv/log files. Codex P2-1 fix: include replay_*."""
     paths = {}
@@ -63,13 +77,31 @@ def find_files(session_dir: Path) -> dict:
             'walking_*.svo2',
         ],
     }
+    excludes = {
+        'npz': ['*_planD_summary*', '*_analysis*', 'analysis.npz'],
+    }
     for key, patterns in candidates.items():
         hits = []
         for p in patterns:
             hits.extend(session_dir.glob(p))
-        # de-dup, sort by mtime newest-first
-        hits = sorted(set(hits), key=lambda x: x.stat().st_mtime, reverse=True) if hits else []
-        paths[key] = hits[0] if hits else None
+        # Apply per-key exclusion patterns
+        for ex in excludes.get(key, []):
+            hits = [h for h in hits if not h.match(ex)]
+        if not hits:
+            paths[key] = None
+            continue
+        # Sort newest-first
+        hits = sorted(set(hits), key=lambda x: x.stat().st_mtime, reverse=True)
+        if key == 'npz':
+            # Schema-validate: pick the newest NPZ that is actually a pose dump.
+            for h in hits:
+                if _is_pose_dump(h):
+                    paths[key] = h
+                    break
+            else:
+                paths[key] = None
+        else:
+            paths[key] = hits[0]
     return paths
 
 
