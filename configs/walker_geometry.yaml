@@ -10,7 +10,9 @@
 # All distances in meters. Measured once at build time + re-zeroed per session.
 
 # Bowden cable mechanics
-r_pulley_m: 0.0125          # AK60 output pulley radius. ⚠️ MEASURE physically (currently 12.5 mm placeholder)
+r_pulley_m: 0.035           # AK60 output pulley radius — 35 mm (70 mm diameter, 사용자 measured 2026-05-15)
+                            # Note: matches treadmill SPOOL_RADIUS_M = 0.035 in
+                            # assistive-vector-treadmill/.../Treadmill_main.ino — same Bowden hardware family
 sheath_internal_length_m: 0.85   # ⚠️ MEASURE (sheath does not change length in compression)
 
 # Sheath exit points (walker frame, where cable leaves the rigid sheath and becomes free)
