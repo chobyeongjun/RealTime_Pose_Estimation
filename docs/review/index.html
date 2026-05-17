@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>H-Walker — Paper 1 Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Pretendard", "Inter", sans-serif; line-height: 1.6; color: #1a1a1a; background: #fafafa; margin: 0; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 40px 32px; }
+  header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    color: white;
+    padding: 32px 36px;
+    border-radius: 14px;
+    margin-bottom: 32px;
+  }
+  h1 { font-size: 28px; margin: 0 0 6px 0; letter-spacing: -0.02em; }
+  .subtitle { color: #94a3b8; font-size: 15px; }
+  .meta-bar { display: flex; gap: 20px; margin-top: 14px; font-size: 13px; color: #cbd5e1; }
+  .meta-bar span::before { content: "·"; margin-right: 8px; color: #475569; }
+  .meta-bar span:first-child::before { content: ""; margin: 0; }
+  h2 { font-size: 20px; margin-top: 40px; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid #ddd; display: flex; align-items: center; gap: 10px; }
+  h2 .icon { font-size: 22px; }
+  .identity {
+    background: white;
+    border-left: 5px solid #1a1a1a;
+    padding: 18px 24px;
+    margin-bottom: 24px;
+    border-radius: 0 8px 8px 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .identity .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #888; margin-bottom: 4px; font-weight: 600; }
+  .identity .value { font-size: 16px; font-weight: 500; }
+  .badge { display: inline-block; padding: 3px 9px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+  .badge-done { background: #d1fae5; color: #065f46; }
+  .badge-progress { background: #fef3c7; color: #92400e; }
+  .badge-todo { background: #e5e7eb; color: #4b5563; }
+  .badge-failed { background: #fee2e2; color: #991b1b; }
+  .badge-key { background: #ddd6fe; color: #5b21b6; }
+  .badge-now { background: #fed7aa; color: #9a3412; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 14px 0; }
+  .card {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 18px 20px;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .card:hover { transform: translateY(-2px); box-shadow: 0 8px 16px rgba(0,0,0,0.08); }
+  .card a { color: inherit; text-decoration: none; }
+  .card h3 { margin: 0 0 6px 0; font-size: 15px; display: flex; align-items: center; gap: 10px; }
+  .card p { margin: 6px 0; font-size: 13px; color: #555; }
+  .card .path { font-family: "SF Mono", Menlo, monospace; font-size: 11px; color: #888; margin-top: 8px; }
+  .card.now { border-color: #fb923c; background: #fff7ed; }
+  .timeline-grid { display: grid; grid-template-columns: 120px 1fr 100px; gap: 10px; align-items: center; margin: 8px 0; }
+  .timeline-grid .month { font-weight: 700; font-size: 13px; color: #555; }
+  .timeline-grid .desc { font-size: 13px; }
+  .timeline-grid .status { text-align: right; }
+  .progress-bar { background: #e5e7eb; height: 4px; border-radius: 2px; overflow: hidden; margin: 4px 0; }
+  .progress-bar .fill { background: linear-gradient(90deg, #10b981, #34d399); height: 100%; }
+  .section-3col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .layer-box {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 14px 18px;
+  }
+  .layer-box h4 { margin: 0 0 8px 0; font-size: 14px; }
+  .layer-box ul { margin: 0; padding-left: 18px; font-size: 13px; }
+  .layer-box li { padding: 2px 0; }
+  .layer-box .scope { font-size: 11px; color: #888; margin-top: 6px; font-family: "SF Mono", Menlo, monospace; }
+  pre.path-block {
+    background: #1e1e1e;
+    color: #e8e8e8;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    overflow-x: auto;
+    margin: 8px 0;
+  }
+  .action-now {
+    background: #fff7ed;
+    border: 2px solid #fb923c;
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin: 24px 0;
+  }
+  .action-now h2 { margin-top: 0; border: none; color: #9a3412; }
+  .action-now ol { margin: 10px 0; padding-left: 24px; }
+  .action-now li { padding: 5px 0; }
+  footer { margin-top: 50px; padding-top: 24px; border-top: 1px solid #ddd; font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>H-Walker — Paper 1 Dashboard</h1>
+  <div class="subtitle">Vision-Based Iterative Learning Control with Slack-Free Avoidance for Cable-Driven Mobile Robotic Platforms</div>
+  <div class="meta-bar">
+    <span>RA-L submission Month 6</span>
+    <span>Robotics 100% framing</span>
+    <span>6-month aggressive</span>
+    <span>Updated 2026-05-17</span>
+  </div>
+</header>
+
+<div class="identity">
+  <div class="label">사용자 Identity</div>
+  <div class="value">Real-time vision-based control engineer for cable-driven mobile robotics</div>
+</div>
+
+<div class="identity" style="border-color: #fb923c;">
+  <div class="label">Paper 1 Identity</div>
+  <div class="value">Robotics engineer 정체성 확립 paper. System + control engineering. 보조 효과 paper 아님.</div>
+</div>
+
+<div class="action-now">
+<h2>⚡ Now — Sprint 0.5 (Phase 2 Fix Walking 검증)</h2>
+<p>force_clamp 작업 전, Jetson walking session 부터. <a href="jetson_walking_step_by_step.html" style="color: #9a3412; font-weight: 600;">→ Step-by-Step 실행 가이드</a></p>
+<ol>
+<li>Mac commit + push (force_clamp 안 건드림)</li>
+<li>Jetson: <code>bash scripts/jetson_phase2_verify.sh</code> + <code>bash scripts/walking_session.sh 60</code></li>
+<li>Mac scp + 3 analysis 명령</li>
+<li>10-metric pass/fail report paste</li>
+<li>Sprint 1A 진입 (forward_kinematics.py TDD) 또는 Plan D iteration</li>
+</ol>
+</div>
+
+<h2><span class="icon">📋</span> Plans &amp; Reviews (HTML dashboards)</h2>
+<div class="cards">
+
+<a href="plan_v5.html"><div class="card">
+<h3>Paper 1 Plan v5 <span class="badge badge-progress">Active</span></h3>
+<p>Title, abstract, C1-C5, R1-R9, 3-tier architecture, 6-month sprint plan</p>
+<p class="path">docs/review/plan_v5.html</p>
+</div></a>
+
+<a href="sprint_0_5_audit.html"><div class="card">
+<h3>Sprint 0.5 Audit <span class="badge badge-done">Done</span></h3>
+<p>Hardware audit (80% 기존), critical r_pulley bug, NPZ 10-metric protocol</p>
+<p class="path">docs/review/sprint_0_5_audit.html</p>
+</div></a>
+
+<a href="jetson_walking_step_by_step.html"><div class="card now">
+<h3>Jetson Walking Step-by-Step <span class="badge badge-now">Now</span></h3>
+<p>5-step 실행 가이드. Phase 2 fix 검증. 사용자 차례.</p>
+<p class="path">docs/review/jetson_walking_step_by_step.html</p>
+</div></a>
+
+<div class="card" style="opacity: 0.5;">
+<h3>Sprint 1A — forward_kinematics <span class="badge badge-todo">TBD</span></h3>
+<p>q[6] → P_shank → ℓ_cable, TDD with 7 tests</p>
+<p class="path">(Sprint 0.5 결과 후 작성)</p>
+</div>
+
+</div>
+
+<h2><span class="icon">🗓️</span> 6-Month Timeline</h2>
+
+<div class="timeline-grid">
+<div class="month">Month 1</div>
+<div class="desc"><strong>Vision + EKF + Kinematics</strong> — W1 hardware audit (현재), W2 EKF iter, W3 kinematics, W4 calibration</div>
+<div class="status"><span class="badge badge-progress">W1 진행</span></div>
+</div>
+<div class="progress-bar"><div class="fill" style="width: 8%;"></div></div>
+
+<div class="timeline-grid">
+<div class="month">Month 2</div>
+<div class="desc">Control stack (Mac, sim) — admittance, slack, dob, ilc, sim_full_loop</div>
+<div class="status"><span class="badge badge-todo">TBD</span></div>
+</div>
+
+<div class="timeline-grid">
+<div class="month">Month 3</div>
+<div class="desc">Teensy firmware + bench test (LSB205 load cell + AK60 + force clamp)</div>
+<div class="status"><span class="badge badge-todo">TBD</span></div>
+</div>
+
+<div class="timeline-grid">
+<div class="month">Month 4</div>
+<div class="desc">Multi-condition walking (F_peak=10/30/50N) + ILC convergence study</div>
+<div class="status"><span class="badge badge-todo">TBD</span></div>
+</div>
+
+<div class="timeline-grid">
+<div class="month">Month 5</div>
+<div class="desc">Data analysis + writing (Method, Results, Discussion, ILC appendix)</div>
+<div class="status"><span class="badge badge-todo">TBD</span></div>
+</div>
+
+<div class="timeline-grid">
+<div class="month">Month 6</div>
+<div class="desc">Revision + RA-L submission ⭐</div>
+<div class="status"><span class="badge badge-todo">TBD</span></div>
+</div>
+
+<h2><span class="icon">🔑</span> Critical Facts</h2>
+<div class="cards">
+
+<div class="card">
+<h3>Hardware</h3>
+<p>r_pulley = 35mm (motor side)</p>
+<p>AK60 max = 70N cable</p>
+<p>Load cell = Futek LSB205</p>
+<p>Teensy 4.1, FlexCAN_T4, USB 2Mbps</p>
+</div>
+
+<div class="card">
+<h3>Force band (verified)</h3>
+<p>F_min = 0.5 N (pretension)</p>
+<p>F_max_rest = 5 N (사용자 spec)</p>
+<p>F_swing_peak = 10/30/50 N sweep</p>
+<p>F_max_hardware = 70 N</p>
+</div>
+
+<div class="card">
+<h3>Software identity</h3>
+<p>Track A: Python 13.7ms / 73Hz</p>
+<p>Track B: CUDA stream p99 19.8ms</p>
+<p>Plan D EKF: 3-cascade, 215 tests pass</p>
+<p>NPZ schema v2 (Phase 2 fix wired)</p>
+</div>
+
+<div class="card">
+<h3>Banned (paper 1 text)</h3>
+<p>assist effect · patient</p>
+<p>rehabilitation · biomech</p>
+<p>clinical · EMG</p>
+<p>→ Robotics venue 만</p>
+</div>
+
+</div>
+
+<h2><span class="icon">🧠</span> 3-Layer Storage Policy</h2>
+
+<div class="section-3col">
+
+<div class="layer-box">
+<h4>HTML — User Dashboard</h4>
+<ul>
+<li>모든 plan / progress / result 통합</li>
+<li>매 작업 cycle 1 HTML</li>
+<li>Copy 가능 command + paste template</li>
+<li>시각적 직관성</li>
+</ul>
+<div class="scope">~/realtime-vision-control/docs/review/</div>
+</div>
+
+<div class="layer-box">
+<h4>MD Vault — LLM Wiki</h4>
+<ul>
+<li>Single source of truth</li>
+<li>Wikilinks [[basename]]</li>
+<li>Knowledge graph, 다음 세션 LLM read entry</li>
+<li>Sprint progress + decisions</li>
+</ul>
+<div class="scope">~/research-vault/realtime-vision-control/Wiki/</div>
+</div>
+
+<div class="layer-box">
+<h4>Memory — Claude Context</h4>
+<ul>
+<li>Critical preference + framing</li>
+<li>14 entries (user / feedback / project / reference)</li>
+<li>다음 세션 자동 로드</li>
+<li>HTML / Wiki / Git policy</li>
+</ul>
+<div class="scope">~/.claude/projects/.../memory/</div>
+</div>
+
+</div>
+
+<h2><span class="icon">📁</span> File &amp; Path Index</h2>
+
+<pre class="path-block">## Plans
+~/.claude/plans/happy-stirring-whisper.md       (Plan v5, system)
+~/research-vault/realtime-vision-control/Plans/plan_v5.md  (mirror)
+
+## HTML Dashboard (this file is hub)
+~/realtime-vision-control/docs/review/
+   index.html                          ← (hub) you are here
+   plan_v5.html                        (Plan overall)
+   sprint_0_5_audit.html               (Sprint 0.5 audit)
+   jetson_walking_step_by_step.html    (current action)
+
+## MD Vault Wiki (LLM-readable)
+~/research-vault/realtime-vision-control/Wiki/
+   README.md                          (wiki entry)
+   Paper1/overview.md
+   Sprints/sprint_0_5.md
+   (Hardware/, Software/, Decisions/ 점진 추가)
+
+## Claude Memory
+~/.claude/projects/-Users-chobyeongjun-realtime-vision-control/memory/
+   MEMORY.md                          (index)
+   user_*.md / feedback_*.md / project_*.md / reference_*.md
+
+## Working dir
+~/realtime-vision-control/
+   src/perception/realtime/pipeline_main.py     (Phase 2 fix wired)
+   src/perception/CUDA_Stream/                  (Track B)
+   src/perception/plan_d_prototype/             (215 tests)
+   src/control/                                 (TBD, Sprint 1-2)
+   firmware/teensy_host_receiver/               (⚠️ unverified placeholder)
+   scripts/walking_session.sh                   (5-phase auto)
+   scripts/analyze_walking_results.py
+   configs/walker_geometry.yaml                 (r_pulley=0.035 verified)
+   docs/hardware/, docs/evolution/, docs/review/
+
+## Treadmill (read-only reference)
+~/assistive-vector-treadmill/                   (⚠️ 절대 modify 금지)</pre>
+
+<h2><span class="icon">🔧</span> Git Workflow (verified policy)</h2>
+
+<div class="cards">
+<div class="card">
+<h3>Before risky work</h3>
+<pre style="font-size: 11px; background: #1e1e1e; color: #e8e8e8; padding: 10px; border-radius: 6px;">git tag backup/$(date +%Y%m%d_%H%M%S)_desc
+# or
+git branch backup/...</pre>
+</div>
+
+<div class="card">
+<h3>New sprint / module</h3>
+<pre style="font-size: 11px; background: #1e1e1e; color: #e8e8e8; padding: 10px; border-radius: 6px;">git checkout -b feature/sprint_N_topic
+git push -u origin feature/sprint_N_topic</pre>
+</div>
+
+<div class="card">
+<h3>Push regular</h3>
+<pre style="font-size: 11px; background: #1e1e1e; color: #e8e8e8; padding: 10px; border-radius: 6px;">git status
+git log --oneline -5
+git push  # NEVER --force without confirm</pre>
+</div>
+
+<div class="card">
+<h3>Sprint end</h3>
+<pre style="font-size: 11px; background: #1e1e1e; color: #e8e8e8; padding: 10px; border-radius: 6px;">git tag sprint_N_complete_YYYYMMDD
+git push --tags
+# merge after user confirm only</pre>
+</div>
+</div>
+
+<h2><span class="icon">🚀</span> Career Context</h2>
+<div class="cards">
+<div class="card">
+<h3>Goal</h3>
+<p>Robotics engineer (humanoid / legged / wearable / autonomous)</p>
+<p>Biomech / clinical 분야 거부</p>
+</div>
+
+<div class="card">
+<h3>Timeline</h3>
+<p>졸업까지 19 개월 (~2027 후반)</p>
+<p>Paper 1: 6 개월</p>
+<p>Month 13 산업/박사 결정</p>
+</div>
+
+<div class="card">
+<h3>Industry targets</h3>
+<p>Naver Labs, 현대 로보틱스, Rainbow</p>
+<p>Tesla Optimus, Figure, Apptronik</p>
+<p>Boston Dynamics, Unitree, 42dot</p>
+</div>
+
+<div class="card">
+<h3>PhD targets (legged / locomotion)</h3>
+<p>MIT Sangbae Kim (Cheetah)</p>
+<p>CMU RI (Johnson, Geyer)</p>
+<p>Caltech Aaron Ames</p>
+<p>ETH Marco Hutter (ANYmal)</p>
+<p>KAIST 박해원 (Cheetah)</p>
+<p>KAIST 황보제민 (Hwangbo, sim2real RL)</p>
+<p>SNU 박종우 (humanoid)</p>
+</div>
+</div>
+
+<footer>
+<p>
+H-Walker Paper 1 Dashboard · 2026-05-17 · Single entry point for all HTML reviews<br>
+Open via: <code>open ~/realtime-vision-control/docs/review/index.html</code><br>
+Plan v5: <code>~/.claude/plans/happy-stirring-whisper.md</code> · Wiki: <code>~/research-vault/realtime-vision-control/Wiki/README.md</code>
+</p>
+</footer>
+
+</div>
+</body>
+</html>

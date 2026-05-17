@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Paper 1 Plan v5 — Vision-Based ILC with Slack-Free Cable Control</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Inter", "Segoe UI", sans-serif;
+    line-height: 1.65;
+    color: #1a1a1a;
+    background: #fafafa;
+    margin: 0;
+    padding: 0;
+  }
+  .container { max-width: 1100px; margin: 0 auto; padding: 40px 32px; }
+  header {
+    border-bottom: 3px solid #1a1a1a;
+    padding-bottom: 24px;
+    margin-bottom: 40px;
+  }
+  h1 { font-size: 28px; margin: 0 0 8px 0; letter-spacing: -0.02em; }
+  .subtitle { color: #666; font-size: 15px; }
+  .meta { display: flex; gap: 16px; margin-top: 12px; font-size: 13px; color: #888; }
+  .meta span::before { content: "·"; margin-right: 8px; color: #ccc; }
+  .meta span:first-child::before { content: ""; margin: 0; }
+  h2 {
+    font-size: 21px;
+    margin-top: 48px;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #ddd;
+  }
+  h3 { font-size: 17px; margin-top: 28px; margin-bottom: 10px; }
+  .identity-box {
+    background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+    color: white;
+    padding: 24px 28px;
+    border-radius: 10px;
+    margin: 20px 0;
+  }
+  .identity-box .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #999; margin-bottom: 6px; }
+  .identity-box .value { font-size: 18px; font-weight: 600; }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .badge-key { background: #fef3c7; color: #92400e; }
+  .badge-info { background: #dbeafe; color: #1e40af; }
+  .badge-decision { background: #d1fae5; color: #065f46; }
+  .badge-risk { background: #fee2e2; color: #991b1b; }
+  .badge-action { background: #ffedd5; color: #9a3412; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 16px 0; }
+  .card {
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 16px 18px;
+  }
+  .card.key { border-left: 4px solid #f59e0b; }
+  .card h4 { margin: 0 0 6px 0; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .card p { margin: 4px 0; font-size: 13px; color: #555; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: white;
+    border-radius: 6px;
+    overflow: hidden;
+    margin: 14px 0;
+    font-size: 14px;
+  }
+  th { background: #f3f4f6; padding: 10px 12px; text-align: left; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #555; }
+  td { padding: 10px 12px; border-top: 1px solid #f0f0f0; }
+  tr:hover td { background: #fafafa; }
+  pre {
+    background: #1e1e1e;
+    color: #e8e8e8;
+    padding: 16px 18px;
+    border-radius: 8px;
+    overflow-x: auto;
+    position: relative;
+    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  pre.with-copy { padding-top: 38px; }
+  .copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: #333;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    font-family: -apple-system, sans-serif;
+  }
+  .copy-btn:hover { background: #444; }
+  .copy-btn.copied { background: #065f46; color: #d1fae5; }
+  code:not(pre code) {
+    background: #f0f0f0;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 13px;
+  }
+  .timeline {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 12px;
+    align-items: start;
+    margin: 8px 0;
+  }
+  .timeline-label {
+    font-weight: 700;
+    font-size: 12px;
+    color: #666;
+    padding-top: 4px;
+  }
+  .timeline-content {
+    background: white;
+    border: 1px solid #e5e5e5;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+  .toc {
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 18px 22px;
+    margin-bottom: 32px;
+  }
+  .toc ul { margin: 0; padding-left: 20px; columns: 2; column-gap: 24px; }
+  .toc li { padding: 3px 0; font-size: 13px; }
+  .toc a { color: #1a1a1a; text-decoration: none; }
+  .toc a:hover { color: #2563eb; text-decoration: underline; }
+  .arch-diagram {
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 20px;
+    margin: 14px 0;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: pre;
+    line-height: 1.4;
+  }
+  .action-box {
+    background: #fff7ed;
+    border: 2px solid #fb923c;
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 24px 0;
+  }
+  .action-box h3 { margin-top: 0; color: #9a3412; }
+  .action-box ol { margin: 10px 0; padding-left: 22px; }
+  .action-box li { padding: 4px 0; }
+  .banned-box {
+    background: #fef2f2;
+    border-left: 4px solid #dc2626;
+    padding: 14px 18px;
+    margin: 14px 0;
+    font-size: 14px;
+  }
+  .banned-box strong { color: #991b1b; }
+  footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid #ddd; font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Paper 1 Plan v5</h1>
+  <div class="subtitle">Vision-Based Iterative Learning Control with Slack-Free Avoidance for Cable-Driven Mobile Robotic Platforms</div>
+  <div class="meta">
+    <span>2026-05-17</span>
+    <span>RA-L Submission, Month 6</span>
+    <span>6-month aggressive timeline</span>
+    <span>Robotics 100% framing</span>
+  </div>
+</header>
+
+<div class="toc">
+  <strong style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #666;">Contents</strong>
+  <ul>
+    <li><a href="#identity">1. Identity</a></li>
+    <li><a href="#abstract">2. Title + Abstract</a></li>
+    <li><a href="#contributions">3. Contributions (C1-C5)</a></li>
+    <li><a href="#validation">4. Validation (R1-R9)</a></li>
+    <li><a href="#architecture">5. 3-Tier Controller</a></li>
+    <li><a href="#ilc">6. ILC Formulation</a></li>
+    <li><a href="#slack">7. Slack Control</a></li>
+    <li><a href="#sprint">8. 6-Month Sprint Plan</a></li>
+    <li><a href="#hardware">9. Hardware Audit Checklist</a></li>
+    <li><a href="#risks">10. Risks + Mitigations</a></li>
+    <li><a href="#files">11. Files Structure</a></li>
+    <li><a href="#today">12. Today Action</a></li>
+  </ul>
+</div>
+
+<h2 id="identity">1. Identity (의문 시 reference)</h2>
+
+<div class="identity-box">
+  <div class="label">사용자 Identity</div>
+  <div class="value">"Real-time vision-based control engineer for cable-driven mobile robotics."</div>
+</div>
+
+<div class="identity-box">
+  <div class="label">Paper 1 Identity</div>
+  <div class="value">Robotics engineer 정체성 확립 paper. 시스템 + control engineering paper. 보조 효과 paper 아님.</div>
+</div>
+
+<p><strong>평가 기준</strong> (매 결정 시):</p>
+<ul>
+  <li>이게 "robotics control engineering" 으로 읽히는가?</li>
+  <li>"Biomech / clinical / assist effect" 색채 있는가? → polish 필요</li>
+  <li>R-claim 이 system + control 으로 measurable 한가?</li>
+</ul>
+
+<h2 id="abstract">2. Title + Abstract</h2>
+
+<h3>Title</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="Vision-Based Iterative Learning Control with Slack-Free Avoidance for Cable-Driven Mobile Robotic Platforms">Copy</button>Vision-Based Iterative Learning Control with Slack-Free Avoidance
+for Cable-Driven Mobile Robotic Platforms</pre>
+
+<h3>Abstract (RA-L)</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="Cable-driven mobile robotic platforms require real-time, slack-free actuator control synchronized to user motion. Existing approaches rely on discrete event triggers (e.g., IMU heel-strike) or fixed kinematic commands (e.g., 150° per cycle), which lack continuous phase information, subject-specific accuracy, and per-cycle learning capability. We present a vision-based control system that integrates (1) continuous gait phase estimation via a 3-cascade EKF with sub-20ms latency, (2) forward kinematics computing subject-specific cable length reference from 30-second calibration, (3) a hybrid pre-emptive + reactive slack-free controller with provable tension bounds, and (4) a phase-indexed iterative learning controller that refines per-cycle feedforward via P-type update with low-pass robustness filter. We prove asymptotic convergence under bounded inter-cycle variability and validate on a cable-driven mobile robotic walker across 5x assist magnitude (10-50N peak). The system achieves cable length tracking RMSE under 1mm after 10 cycles of ILC learning, slack event probability below 1%, and disturbance recovery within 200ms. The architecture generalizes to cable-driven mobile robots requiring user-cooperative actuator control with cyclic motion patterns.">Copy</button>Cable-driven mobile robotic platforms require real-time, slack-free actuator
+control synchronized to user motion. Existing approaches rely on discrete event
+triggers (e.g., IMU heel-strike) or fixed kinematic commands (e.g., 150° per
+cycle), which lack continuous phase information, subject-specific accuracy, and
+per-cycle learning capability. We present a vision-based control system that
+integrates (1) continuous gait phase estimation via a 3-cascade EKF with
+sub-20ms latency, (2) forward kinematics computing subject-specific cable
+length reference from 30-second calibration, (3) a hybrid pre-emptive +
+reactive slack-free controller with provable tension bounds, and (4) a
+phase-indexed iterative learning controller that refines per-cycle feedforward
+via P-type update with low-pass robustness filter. We prove asymptotic
+convergence under bounded inter-cycle variability and validate on a
+cable-driven mobile robotic walker across 5x assist magnitude (10-50N peak).
+The system achieves cable length tracking RMSE under 1mm after 10 cycles of
+ILC learning, slack event probability below 1%, and disturbance recovery
+within 200ms. The architecture generalizes to cable-driven mobile robots
+requiring user-cooperative actuator control with cyclic motion patterns.</pre>
+
+<h2 id="contributions">3. Contributions (C1-C5)</h2>
+
+<div class="cards">
+  <div class="card">
+    <h4>C1 <span class="badge badge-info">Vision</span></h4>
+    <p>Real-time marker-less continuous gait phase estimation</p>
+    <p style="color:#888;">Plan D EKF, sub-20ms, vs discrete IMU</p>
+  </div>
+  <div class="card">
+    <h4>C2 <span class="badge badge-info">Kinematics</span></h4>
+    <p>Forward kinematics + per-subject cable length reference</p>
+    <p style="color:#888;">q[6] → P_shank → ℓ, 30s calibration</p>
+  </div>
+  <div class="card key">
+    <h4>C3 <span class="badge badge-key">Key-1</span></h4>
+    <p>Pre-emptive + reactive slack-free controller</p>
+    <p style="color:#888;">50ms forecast + tension floor + provable bounds</p>
+  </div>
+  <div class="card key">
+    <h4>C4 <span class="badge badge-key">Key-2</span></h4>
+    <p>Iterative Learning Control with vision phase indexing</p>
+    <p style="color:#888;">P-type, Q-filter, convergence proof</p>
+  </div>
+  <div class="card">
+    <h4>C5 <span class="badge badge-info">Robust</span></h4>
+    <p>4-axis robust controller</p>
+    <p style="color:#888;">sensor noise + friction + perturbation + drift</p>
+  </div>
+</div>
+
+<p><strong>Selling points</strong>: C3 + C4 (둘 다 provable bounds). Paper 의 dual KEY.</p>
+
+<h2 id="validation">4. Validation (R1-R9)</h2>
+
+<table>
+<thead><tr><th>ID</th><th>Metric</th><th>Pass criterion</th></tr></thead>
+<tbody>
+<tr><td>R1</td><td>Pose accuracy (synthetic Mocap GT)</td><td>RMSE_P_shank &lt; 10mm</td></tr>
+<tr><td>R2</td><td>Length tracking (baseline before ILC)</td><td>RMSE_ℓ &lt; 5mm</td></tr>
+<tr style="background:#fef3c7;"><td><strong>R3</strong> <span class="badge badge-key">Key</span></td><td>Slack avoidance</td><td>P(F&lt;0.3N) &lt; 1% over 30min × 3 conditions</td></tr>
+<tr><td>R4</td><td>Phase locking</td><td>|τ_lag| &lt; 20ms, corr &gt; 0.9</td></tr>
+<tr><td>R5</td><td>Disturbance recovery</td><td>&lt; 200ms to taut + tracking</td></tr>
+<tr><td>R6</td><td>Long-term stability</td><td>30min, zero drift, zero failure</td></tr>
+<tr><td>R7</td><td>Force band compliance</td><td>P(0.5≤F≤50N) &gt; 99%</td></tr>
+<tr style="background:#fef3c7;"><td><strong>R8</strong> <span class="badge badge-key">Key</span></td><td>ILC convergence</td><td>RMSE_10 / RMSE_1 &lt; 0.3</td></tr>
+<tr><td>R9</td><td>ILC robustness</td><td>u_FF drift &lt; 10% across 3 sessions</td></tr>
+</tbody>
+</table>
+
+<p>R3 + R8 = paper 의 main result figures.</p>
+
+<h2 id="architecture">5. 3-Tier Controller Architecture</h2>
+
+<div class="arch-diagram">┌─────────────────────────────────────────────────────────────────┐
+│ Tier 0 — Reference Generation (Jetson, 60-120 Hz)                │
+│   ZED → YOLO TRT → Plan D EKF → φ, ω, q[6]                       │
+│   Forward kinematics → P_shank → ℓ_ref(φ_fwd)                    │
+│   ILC store: u_k(φ) lookup                                        │
+│   50ms forecast: φ_fwd = φ + ω × 0.050                            │
+│   Output via SHM: ℓ_ref, F_FF, u_k                                │
+└──────────────────────────────────│──────────────────────────────┘
+                                   ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ Tier 1 — Cooperative Admittance (Teensy, 1 kHz)                  │
+│   Mv ẍ + Bv ẋ + Kv(φ) (x − ℓ_ref) = F_meas − F_FF              │
+│   Mv=0.1kg, Bv=2 Ns/m                                             │
+│   Kv(φ): stance 1 N/m, swing 50 N/m                               │
+│   → ℓ_cmd                                                         │
+└──────────────────────────────────│──────────────────────────────┘
+                                   ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ Tier 2 — Inner loops (Teensy, 4 kHz)                             │
+│   τ_pos = Kp×e_pos + Kd×ė_pos              (PD position)         │
+│   τ_F   = Kp_F×e_F + Ki_F×∫e_F              (PI force, load cell)│
+│   τ_DOB = (c1 sign(ℓ̇) + c2 ℓ̇) × r_pulley   (Bowden friction)   │
+│   Δτ_s  = K_slack × max(0, F_min − F_meas)  (reactive slack)     │
+│   u_k(φ)                                     (ILC FF, phase-idx) │
+│   τ_total = α τ_pos + (1-α) τ_F + τ_DOB + Δτ_s + u_k(φ)         │
+│   Safety: τ_motor = clip(τ_total, 0, 1.75 Nm)                    │
+└──────────────────────────────────│──────────────────────────────┘
+                                   ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ Tier 3 — FOC Current Loop (AK60 펌웨어, ~10 kHz)                  │
+│   I_des = τ_motor / K_t  →  PI on I  →  SVPWM  →  BLDC          │
+└──────────────────────────────────│──────────────────────────────┘
+                                   ↓
+                          CABLE TENSION ON USER
+                                   ↓
+                    Load cell + Encoder → loop closure</div>
+
+<h2 id="ilc">6. ILC Formulation</h2>
+
+<h3>Update law (P-type)</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="u_{k+1}(phi) = Q(z) * [u_k(phi) + L * e_k(phi)]&#10;&#10;e_k(phi) = ell_ref(phi) - ell_actual_k(phi)&#10;L = 0.3 (initial), tunable 0.1-0.5&#10;Q(z) = low-pass, cutoff 8 Hz (gait 1-2 Hz x 5 harmonics margin)">Copy</button>u_{k+1}(φ) = Q(z) × [u_k(φ) + L × e_k(φ)]
+
+e_k(φ) = ℓ_ref(φ) − ℓ_actual_k(φ)
+L      = 0.3 (initial), tunable 0.1-0.5
+Q(z)   = low-pass, cutoff 8 Hz
+         (gait fundamental 1-2 Hz × 5 harmonics margin)</pre>
+
+<h3>Phase-indexed (not time-indexed)</h3>
+<ul>
+  <li>매 cycle 마다 φ ∈ [0, 2π) progression 다름</li>
+  <li>Resample e_k(t) → e_k(φ) using Plan D EKF φ(t)</li>
+  <li>Inter-cycle variability robust</li>
+</ul>
+
+<h3>Convergence (paper appendix)</h3>
+<pre>Condition: |1 − L × P(z)| × |Q(z)| < 1 for all |z| = 1
+
+Plant P(z): admittance + motor + cable dynamics, linearized
+
+Asymptotic bound: ||e_∞(φ)|| ≤ ε_noise / (1 − Q(0))
+                  → tunable to < 1mm under typical noise</pre>
+
+<h2 id="slack">7. Slack Control (KEY C3)</h2>
+
+<h3>Pre-emptive layer (Tier 0)</h3>
+<pre>φ_fwd = φ + ω × 50ms
+ℓ_target = ℓ_ref(φ_fwd)
+→ motor adjusts BEFORE slack 발생</pre>
+
+<h3>Reactive layer (Tier 2)</h3>
+<pre>if F_meas < F_min (0.5N):
+    Δτ_slack = K_slack × (F_min − F_meas)
+    τ_total += Δτ_slack
+→ slack 발생 즉시 복구 within 1ms</pre>
+
+<h3>Provable bound</h3>
+<pre>Under bounded sensor noise ε_s and bounded user acceleration a_u:
+    F_meas(t) ≥ F_min − ε_total
+    ε_total = f(latency, K_slack, Bv, Mv, ε_s, a_u)
+Tunable to ε_total < 0.2N → 99.9% slack-free</pre>
+
+<h2 id="sprint">8. 6-Month Sprint Plan</h2>
+
+<div class="timeline">
+  <div class="timeline-label">Month 1</div>
+  <div class="timeline-content">
+    <strong>Vision + EKF + Kinematics</strong><br>
+    W1: Plan v5 ✓ + hardware audit + Phase 2 walking session 1<br>
+    W2: NPZ analysis + Plan D EKF iteration (Q, R tuning)<br>
+    W3: <code>src/control/kinematics.py</code> (TDD, 7 tests)<br>
+    W4: <code>src/control/reference.py</code> (calibration ℓ_ref)
+  </div>
+</div>
+
+<div class="timeline">
+  <div class="timeline-label">Month 2</div>
+  <div class="timeline-content">
+    <strong>Control Stack (Mac, Sim)</strong><br>
+    W1: <code>admittance.py</code> (variable Kv)<br>
+    W2: <code>slack.py</code> (pre-emptive + reactive)<br>
+    W3: <code>dob.py</code> + <code>ilc.py</code><br>
+    W4: <code>sim_full_loop.py</code> — ILC convergence sim
+  </div>
+</div>
+
+<div class="timeline">
+  <div class="timeline-label">Month 3</div>
+  <div class="timeline-content">
+    <strong>Teensy + Bench</strong><br>
+    W1: Teensy firmware (Tier 2/3 + ILC)<br>
+    W2: Bench test (1/2/3/5 kg weight, V1 equivalent)<br>
+    W3: Walking session F_peak=10N (30min)<br>
+    W4: Iteration (DOB, slack K, ILC L)
+  </div>
+</div>
+
+<div class="timeline">
+  <div class="timeline-label">Month 4</div>
+  <div class="timeline-content">
+    <strong>Multi-condition Walking</strong><br>
+    W1: F_peak=30N (30min)<br>
+    W2: F_peak=50N (30min)<br>
+    W3: ILC convergence study<br>
+    W4: Final R1-R9 raw data
+  </div>
+</div>
+
+<div class="timeline">
+  <div class="timeline-label">Month 5</div>
+  <div class="timeline-content">
+    <strong>Writing</strong><br>
+    W1: Data analysis + plot generation<br>
+    W2-3: Method + Results draft<br>
+    W4: Intro + Discussion + ILC proof appendix
+  </div>
+</div>
+
+<div class="timeline">
+  <div class="timeline-label">Month 6</div>
+  <div class="timeline-content">
+    <strong>Submission</strong><br>
+    W1: Internal review<br>
+    W2: External review (codex)<br>
+    W3: Final polish<br>
+    W4: <strong>RA-L submission ⭐</strong>
+  </div>
+</div>
+
+<h2 id="hardware">9. Hardware Audit Checklist (Sprint 0.5)</h2>
+
+<ul>
+  <li>☐ <strong>Load cell</strong>: 모델명 (HX711?), sampling rate, ADC bit, noise, mounting position</li>
+  <li>☐ <strong>AK60</strong>: control mode option, current limit, CAN message spec</li>
+  <li>☐ <strong>Teensy</strong>: firmware location, main loop frequency, ADC capability</li>
+  <li>☐ <strong>SHM/IPC</strong>: 현 Jetson↔Teensy 통신 방식</li>
+  <li>☐ <strong>P_anchor</strong>: 정확 측정 (vs placeholder [0.18, -0.05, 0.10])</li>
+  <li>☐ <strong>Bowden sheath</strong>: measured length (vs 0.85m estimate)</li>
+  <li>☐ <strong>Cable property</strong>: stretch coefficient, mass per meter</li>
+</ul>
+<p>Output: <code>docs/hardware/walker_control_audit.md</code></p>
+
+<h2 id="risks">10. Risks + Mitigations</h2>
+
+<table>
+<thead><tr><th>Risk</th><th>Prob</th><th>Mitigation</th></tr></thead>
+<tbody>
+<tr><td>Plan D ω 학습 안 됨</td><td><span class="badge badge-risk">M</span></td><td>Month 1 W1-W2 우선 검증, fallback to Hilbert-only</td></tr>
+<tr><td>ILC convergence 실패 (sim)</td><td><span class="badge badge-risk">M</span></td><td>Q filter / L gain tuning, P-type → norm-optimal</td></tr>
+<tr><td>Teensy firmware 미완</td><td><span class="badge badge-risk">M</span></td><td>외부 도움 또는 simpler architecture 단계적</td></tr>
+<tr><td>Load cell noise</td><td><span class="badge badge-decision">L</span></td><td>4kHz averaging, Kalman pre-filter</td></tr>
+<tr><td>6-month timeline 압박</td><td><span class="badge badge-risk">M</span></td><td>Sim-first + parallel writing + Month 6 W4 buffer</td></tr>
+<tr><td>교수님 framing 반대</td><td><span class="badge badge-decision">L-M</span></td><td>Discussion 1 paragraph 양보 가능 (walker healthcare context)</td></tr>
+</tbody>
+</table>
+
+<h2 id="files">11. Files & Directories</h2>
+
+<h3>To be created (Month 1-2)</h3>
+<pre>src/control/
+  __init__.py
+  kinematics.py        (Sprint 1 W3)
+  cable_length.py      (Sprint 1 W3)
+  reference.py         (Sprint 1 W4)
+  admittance.py        (Sprint 2 W1)
+  slack.py             (Sprint 2 W2)
+  dob.py               (Sprint 2 W3)
+  ilc.py               (Sprint 2 W3)
+  sim_full_loop.py     (Sprint 2 W4)
+
+tests/test_*.py        (각 module 동시 TDD)
+
+docs/hardware/walker_control_audit.md
+docs/review/plan_v5.html  ✓ (this file)
+cpp/teensy/              (Month 3)</pre>
+
+<div class="banned-box">
+<strong>Banned words (paper 1 text 전체)</strong>:<br>
+assist effect · patient · rehabilitation · biomech · clinical · EMG<br>
+→ Robotics venue mismatch + 사용자 진로 framing 약화
+</div>
+
+<h2 id="today">12. Immediate Action (Today)</h2>
+
+<div class="action-box">
+<h3>지금 시작</h3>
+<ol>
+<li>✓ Plan v5 written</li>
+<li>✓ Memory entries saved (11 files, 영원한 기억)</li>
+<li>✓ HTML review version (this file)</li>
+<li>☐ <strong>Hardware audit</strong> — load cell / AK60 / Teensy 위치 확인 → <code>docs/hardware/walker_control_audit.md</code></li>
+<li>☐ <strong>Phase 2 fix walking session 1</strong> — Jetson 60s 보행 → recordings/walking_&lt;TS&gt;/</li>
+<li>☐ <strong>NPZ analysis report</strong> — Plan D ω convergence, L3 frame ratio, invalid burst</li>
+</ol>
+</div>
+
+<footer>
+<p>
+Plan v5 · 2026-05-17 · Paper 1: Vision-Based ILC with Slack-Free Cable Control · 6-month aggressive timeline · RA-L submission Month 6 · Robotics 100% framing<br>
+Source: <code>~/.claude/plans/happy-stirring-whisper.md</code> · Mirror: <code>vault/realtime-vision-control/Plans/plan_v5.md</code>
+</p>
+</footer>
+
+</div>
+
+<script>
+document.querySelectorAll('.copy-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const text = btn.getAttribute('data-copy') || btn.parentElement.textContent.replace(/^Copy\s*/, '');
+    try {
+      await navigator.clipboard.writeText(text);
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1200);
+    } catch (e) {
+      btn.textContent = 'Failed';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+    }
+  });
+});
+</script>
+
+</body>
+</html>

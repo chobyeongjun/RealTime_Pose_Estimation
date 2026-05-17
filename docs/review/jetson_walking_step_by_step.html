@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Jetson Walking Session — Step-by-Step Execution Guide</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Pretendard", "Inter", sans-serif; line-height: 1.65; color: #1a1a1a; background: #fafafa; margin: 0; }
+  .container { max-width: 1000px; margin: 0 auto; padding: 40px 32px; }
+  header { border-bottom: 3px solid #1a1a1a; padding-bottom: 24px; margin-bottom: 40px; }
+  h1 { font-size: 26px; margin: 0 0 8px 0; letter-spacing: -0.02em; }
+  .subtitle { color: #666; font-size: 15px; }
+  .meta { display: flex; gap: 16px; margin-top: 12px; font-size: 13px; color: #888; }
+  .meta span::before { content: "·"; margin-right: 8px; color: #ccc; }
+  .meta span:first-child::before { content: ""; margin: 0; }
+  h2 { font-size: 21px; margin-top: 40px; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid #ddd; }
+  h3 { font-size: 16px; margin-top: 24px; margin-bottom: 10px; }
+  .step {
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin: 24px 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .step-num {
+    display: inline-block;
+    background: #1a1a1a;
+    color: white;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 32px;
+    font-weight: 700;
+    margin-right: 12px;
+    font-size: 15px;
+  }
+  .step h2 {
+    border: none;
+    margin: 0 0 8px 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+  }
+  .step-desc { color: #666; font-size: 14px; margin-bottom: 16px; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge-cmd { background: #dbeafe; color: #1e40af; }
+  .badge-output { background: #d1fae5; color: #065f46; }
+  .badge-paste { background: #ffedd5; color: #9a3412; }
+  .badge-key { background: #fef3c7; color: #92400e; }
+  .badge-wait { background: #ede9fe; color: #5b21b6; }
+  pre { background: #1e1e1e; color: #e8e8e8; padding: 14px 16px; border-radius: 8px; overflow-x: auto; position: relative; font-family: "SF Mono", Menlo, monospace; font-size: 13px; line-height: 1.55; margin: 12px 0; }
+  pre.with-copy { padding-top: 36px; }
+  .copy-btn { position: absolute; top: 6px; right: 6px; background: #333; color: #e0e0e0; border: 1px solid #444; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; font-family: -apple-system, sans-serif; }
+  .copy-btn:hover { background: #444; }
+  .copy-btn.copied { background: #065f46; color: #d1fae5; }
+  code:not(pre code) { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-family: "SF Mono", Menlo, monospace; font-size: 13px; }
+  .expected {
+    background: #ecfdf5;
+    border-left: 4px solid #10b981;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 12px 0;
+    font-size: 13px;
+  }
+  .expected strong { color: #065f46; }
+  .warning {
+    background: #fef2f2;
+    border-left: 4px solid #dc2626;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 12px 0;
+    font-size: 13px;
+  }
+  .warning strong { color: #991b1b; }
+  .note {
+    background: #fffbeb;
+    border-left: 4px solid #f59e0b;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 12px 0;
+    font-size: 13px;
+  }
+  .note strong { color: #92400e; }
+  table { width: 100%; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; margin: 12px 0; font-size: 13px; }
+  th { background: #f3f4f6; padding: 8px 10px; text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; color: #555; }
+  td { padding: 8px 10px; border-top: 1px solid #f0f0f0; vertical-align: top; }
+  .paste-template {
+    background: #fff7ed;
+    border: 2px dashed #fb923c;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 14px 0;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+  }
+  .checklist {
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 12px 18px;
+  }
+  .checklist li { padding: 4px 0; font-size: 14px; }
+  footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid #ddd; font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Jetson Walking Session — Step-by-Step</h1>
+  <div class="subtitle">Phase 2 fix 검증 (Plan D ω · cascade · hip_world_vertical) · force_clamp 작업 전 우선</div>
+  <div class="meta">
+    <span>2026-05-17</span>
+    <span>Sprint 0.5</span>
+    <span>60s walking</span>
+    <span>5 steps</span>
+  </div>
+</header>
+
+<div class="note">
+<strong>왜 이 작업이 먼저?</strong><br>
+1. <code>force_clamp.h</code> 의 r_pulley placeholder 는 unverified legacy → 일단 보류, cable 연결 단계 (Sprint 3) 직전 재작업.<br>
+2. Paper 1 의 핵심 contribution C1 (vision phase estimation) 의 검증 = Plan D EKF 가 real gait 에서 ω 학습 + cascade L3 도달.<br>
+3. 이 검증이 안 되면 forward kinematics / admittance / ILC 모두 base 가 없음.<br>
+4. 사용자 직접 본인 보행 60초 → Plan D refinement 의 evidence.
+</div>
+
+<div class="step">
+<h2><span class="step-num">1</span> Pre-flight check <span class="badge badge-cmd">command</span></h2>
+<p class="step-desc">Mac 에서 commit + push (force_clamp.h 는 안 건드림). Jetson 에서 pull.</p>
+
+<h3>Mac:</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="cd ~/realtime-vision-control&#10;git status&#10;git log --oneline -5">Copy</button>cd ~/realtime-vision-control
+git status
+git log --oneline -5</pre>
+
+<div class="expected">
+<strong>Expected:</strong> 최근 commit 에 <code>dc77500</code> (Phase 2 fix) 또는 <code>e3bb1f9</code> 포함. Working tree clean 또는 docs/review 만 untracked.
+</div>
+
+<h3>Jetson (ssh 또는 직접):</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="cd ~/realtime-vision-control&#10;git pull&#10;git rev-parse --short HEAD">Copy</button>cd ~/realtime-vision-control
+git pull
+git rev-parse --short HEAD</pre>
+
+<div class="expected">
+<strong>Expected:</strong> Jetson 의 HEAD 가 Mac 과 동일 commit hash.
+</div>
+
+<h3>Phase 2 fix 의 215 unit test:</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="bash scripts/jetson_phase2_verify.sh 2>&1 | tee /tmp/phase2_verify.log&#10;echo exit=$?">Copy</button>bash scripts/jetson_phase2_verify.sh 2>&1 | tee /tmp/phase2_verify.log
+echo exit=$?</pre>
+
+<div class="expected">
+<strong>Expected:</strong> <code>=== ALL Phase 2 VERIFIED on Jetson — Plan D ready for walking ===</code> + exit=0.<br>
+215 unit tests (Phase 1.5: 126 + Phase 2: 89) 모두 pass.
+</div>
+
+<div class="warning">
+<strong>If fail:</strong> scipy 미설치 또는 import 실패. <code>pip3 install --user scipy</code> 후 재시도.
+</div>
+
+<div style="margin-top: 16px;">
+<span class="badge badge-paste">Paste me</span> Mac 에서 Jetson 결과 받은 후 다음 형식으로:
+<div class="paste-template">commit: &lt;hash&gt;
+phase2_verify: PASS / FAIL
+unit tests: 215/215 PASS / X failed</div>
+</div>
+</div>
+
+<div class="step">
+<h2><span class="step-num">2</span> Walking session 실행 <span class="badge badge-cmd">command</span> <span class="badge badge-wait">60 seconds</span></h2>
+<p class="step-desc">5-phase 자동 실행: nvpmodel → SVO record → pipeline replay → trace analyze → Plan D offline.</p>
+
+<pre class="with-copy"><button class="copy-btn" data-copy="cd ~/realtime-vision-control&#10;bash scripts/walking_session.sh 60">Copy</button>cd ~/realtime-vision-control
+bash scripts/walking_session.sh 60</pre>
+
+<div class="note">
+<strong>사용자 의무 (Phase 2 prompt 시):</strong><br>
+- 카메라 정면 ~2m 위치<br>
+- Walking 준비 후 Enter 누름<br>
+- 60초 자연 보행 (fitted pants 권장, healthy gait)<br>
+- Camera 시야 안 벗어남
+</div>
+
+<div class="expected">
+<strong>Expected output (last lines):</strong>
+<pre style="font-size: 11px; margin: 8px 0; background: #064e3b; color: #d1fae5;">============================================================
+=== WALKING SESSION SUMMARY ===
+============================================================
+  Recordings: recordings/walking_YYYYMMDD_HHMMSS
+  ...
+=== walking session 완료 ===</pre>
+</div>
+
+<div class="warning">
+<strong>If fail:</strong>
+<ul style="margin: 6px 0;">
+<li>"pyzed.sl import 실패" → ZED SDK Python binding 미설치</li>
+<li>"SVO file 생성 X" → ZED camera 연결 확인</li>
+<li>"pose npz 생성 X" → pipeline_main.py 의 --record-pose-npz 미적용</li>
+</ul>
+</div>
+
+<div style="margin-top: 16px;">
+<span class="badge badge-paste">Paste me</span>:
+<div class="paste-template">recording dir: recordings/walking_YYYYMMDD_HHMMSS/
+files:
+  walking_*.svo2   - X.X MB
+  walking_*.npz    - X.X MB
+  trace_*.csv      - X.X KB
+  plan_d_*.log     - X.X KB
+  analyze_*.txt    - X.X KB
+
+session exit: 0 / nonzero</div>
+</div>
+</div>
+
+<div class="step">
+<h2><span class="step-num">3</span> 결과 Mac 으로 복사 <span class="badge badge-cmd">command</span></h2>
+<p class="step-desc">Mac 에서 분석하기 위해 recordings/ scp 또는 rsync.</p>
+
+<h3>Mac 에서:</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="# Jetson hostname / IP 에 맞게 수정&#10;scp -r jetson@JETSON_IP:~/realtime-vision-control/recordings/walking_YYYYMMDD_HHMMSS \&#10;     ~/realtime-vision-control/recordings/">Copy</button># Jetson hostname / IP 에 맞게 수정
+scp -r jetson@JETSON_IP:~/realtime-vision-control/recordings/walking_YYYYMMDD_HHMMSS \
+     ~/realtime-vision-control/recordings/</pre>
+
+<div class="expected">
+<strong>Expected:</strong> Mac 의 <code>~/realtime-vision-control/recordings/walking_TS/</code> 에 5 file 모두 복사 완료.
+</div>
+</div>
+
+<div class="step">
+<h2><span class="step-num">4</span> NPZ 분석 — 10 Metric <span class="badge badge-cmd">command</span> <span class="badge badge-key">Critical</span></h2>
+<p class="step-desc">Mac 에서 자동 분석 + plot 생성. 10 metric 의 pass/fail 결정.</p>
+
+<h3>분석 1 — Walking results (M1-M3, M7, M10):</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="cd ~/realtime-vision-control&#10;TS=$(ls -td recordings/walking_* | head -1 | xargs basename | sed 's/walking_//')&#10;echo &quot;Analyzing: walking_${TS}&quot;&#10;PYTHONPATH=src python3 scripts/analyze_walking_results.py recordings/walking_${TS}/">Copy</button>cd ~/realtime-vision-control
+TS=$(ls -td recordings/walking_* | head -1 | xargs basename | sed 's/walking_//')
+echo "Analyzing: walking_${TS}"
+PYTHONPATH=src python3 scripts/analyze_walking_results.py recordings/walking_${TS}/</pre>
+
+<div class="expected">
+<strong>Expected output files:</strong>
+<ul style="margin: 6px 0; font-size: 13px;">
+<li><code>analysis.json</code> — machine-readable</li>
+<li><code>analysis.md</code> — paste-friendly markdown</li>
+<li><code>joint_angles_deg.png</code> — M7 visual</li>
+<li><code>hip_z_trajectory.png</code> — M8 visual</li>
+<li><code>e2e_latency_hist.png</code> — M10 visual</li>
+</ul>
+</div>
+
+<h3>분석 2 — Invalid burst (M9):</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="python3 scripts/analyze_invalid_bursts.py recordings/walking_${TS}/walking_${TS}.npz">Copy</button>python3 scripts/analyze_invalid_bursts.py recordings/walking_${TS}/walking_${TS}.npz</pre>
+
+<div class="expected">
+<strong>Expected stdout:</strong>
+<pre style="font-size: 11px; margin: 8px 0; background: #064e3b; color: #d1fae5;">frames total: N, valid: V (X.X%)
+
+INVALID bursts (frame is invalid):
+  count        : N
+  median length: X frames
+  max length   : X frames
+  &gt; 3 frames (depth_hold 한계 초과): X
+  &gt; 10 frames: X
+  &gt; 30 frames (0.5초 이상): X
+
+VALID runs:
+  count: N
+  median length: X frames
+  max length: X frames</pre>
+</div>
+
+<h3>분석 3 — Plan D EKF learning (M4, M5, M6, M8):</h3>
+<pre class="with-copy"><button class="copy-btn" data-copy="python3 scripts/visualize_ekf_learning.py recordings/walking_${TS}/walking_${TS}.npz">Copy</button>python3 scripts/visualize_ekf_learning.py recordings/walking_${TS}/walking_${TS}.npz</pre>
+
+<div class="expected">
+<strong>Expected:</strong> PNG plot 생성 (cascade level 시계열 + ω convergence + φ progression).
+</div>
+
+<div style="margin-top: 16px;">
+<span class="badge badge-paste">Paste me</span>:
+<div class="paste-template">## analysis.md (전체)
+[paste here]
+
+## analyze_invalid_bursts stdout
+[paste here]
+
+## visualize_ekf_learning 결과
+- PNG 생성: yes / no
+- cascade transitions: L1→L2 time = X.X s, L1→L3 time = X.X s
+- ω final value (rad/s): X.XX
+- L3 ratio (visual): XX%
+- φ progression: smooth / jumps / static</div>
+</div>
+</div>
+
+<div class="step">
+<h2><span class="step-num">5</span> 10 Metric Pass/Fail Report <span class="badge badge-key">Critical</span></h2>
+<p class="step-desc">사용자 가 직접 작성 또는 Mac 에서 정리. Phase 2 fix 가 작동했는지 결정.</p>
+
+<table>
+<thead><tr><th>#</th><th>Metric</th><th>Source</th><th>Pass criterion</th></tr></thead>
+<tbody>
+<tr><td>M1</td><td>Frame rate (fps)</td><td>analysis.json: <code>fps</code></td><td>&gt; 60 Hz</td></tr>
+<tr><td>M2</td><td>Valid ratio</td><td><code>valid_ratio</code></td><td>&gt; 95%</td></tr>
+<tr><td>M3</td><td>NPZ schema completeness</td><td>NPZ keys list</td><td>15+ v2 key 모두 존재</td></tr>
+<tr style="background:#fef3c7;"><td>M4 <span class="badge badge-key">Key</span></td><td>Plan D ω convergence</td><td>plan_d log + cascade trace</td><td>L1→L2 &lt; 5s</td></tr>
+<tr style="background:#fef3c7;"><td>M5 <span class="badge badge-key">Key</span></td><td>Cascade L3 ratio</td><td>analyze: is_ready_true_ratio</td><td>&gt; 80%</td></tr>
+<tr><td>M6</td><td>Phase φ continuity</td><td>visualize plot</td><td>No jumps &gt; π</td></tr>
+<tr><td>M7</td><td>Joint q[6] sanity</td><td>joints stats</td><td>std &lt; 0.3 rad</td></tr>
+<tr style="background:#fef3c7;"><td>M8 <span class="badge badge-key">Key</span></td><td>Hip vertical periodicity</td><td>hip_z FFT</td><td>Peak 1-2 Hz</td></tr>
+<tr><td>M9</td><td>Invalid burst</td><td>analyze_invalid_bursts</td><td>median &lt; 5, max &lt; 30</td></tr>
+<tr><td>M10</td><td>E2E latency</td><td>trace.csv</td><td>p50 &lt; 14ms, p99 &lt; 20ms</td></tr>
+</tbody>
+</table>
+
+<div style="margin-top: 16px;">
+<span class="badge badge-paste">Paste me</span> (또는 사용자 가 직접 작성):
+<div class="paste-template">## 10 Metric Pass/Fail Report
+
+M1 (fps):                ____ Hz   [PASS / FAIL]
+M2 (valid ratio):        ____ %    [PASS / FAIL]
+M3 (schema):             ____ keys [PASS / FAIL]
+M4 (L1→L2 transition):   ____ s    [PASS / FAIL]  ⭐
+M5 (L3 ratio):           ____ %    [PASS / FAIL]  ⭐
+M6 (φ continuity):       smooth/jumps [PASS / FAIL]
+M7 (joint sanity):       std ____ rad [PASS / FAIL]
+M8 (hip period FFT):     peak ____ Hz [PASS / FAIL]  ⭐
+M9 (invalid burst):      median ____ frames, max ____ frames [PASS / FAIL]
+M10 (e2e):               p50 ____ms, p99 ____ms [PASS / FAIL]
+
+## Issues / observations
+- ...
+- ...
+
+## Next step recommendation
+[from user 또는 다음 HTML 에서 결정]</div>
+</div>
+
+<div class="note">
+<strong>M4 + M5 + M8</strong> = Phase 2 fix 의 핵심 검증. 이 3 모두 PASS → Plan D EKF 가 real gait 에서 작동 → Sprint 1B (forward kinematics) 진입 가능. 1 개라도 FAIL → Plan D EKF iteration 작업 우선.
+</div>
+</div>
+
+<h2>다음 step (결과 받은 후)</h2>
+
+<div class="checklist">
+<ul>
+<li><strong>Case A — 10 metric 모두 PASS</strong>: Sprint 1B 진입 → forward_kinematics.py TDD cycle 시작 (다음 HTML 작성)</li>
+<li><strong>Case B — M4/M5/M8 fail</strong>: Plan D EKF iteration (Hilbert window, Q/R covariance, divergence threshold) → 새 HTML 으로 fix plan</li>
+<li><strong>Case C — M1/M2/M10 fail</strong>: System-level issue (jetson_clocks, GPU contention) → docs/hardware/system-state.md 점검</li>
+<li><strong>Case D — M9 fail</strong>: Vision dropout 많음 → depth_hold 한계 조정 또는 YOLO confidence threshold</li>
+</ul>
+</div>
+
+<h2>checklist</h2>
+
+<ul class="checklist">
+<li>☐ Step 1: Mac commit/push + Jetson pull + phase2_verify.sh PASS</li>
+<li>☐ Step 2: walking_session.sh 60 실행 + 5 file 생성</li>
+<li>☐ Step 3: recordings/ Mac scp</li>
+<li>☐ Step 4: 3 분석 명령 실행 + analysis.md/json + PNG 생성</li>
+<li>☐ Step 5: 10 metric pass/fail report paste</li>
+<li>☐ 다음 HTML 작성 (Case A/B/C/D 결정 후)</li>
+</ul>
+
+<footer>
+<p>
+Jetson Walking Step-by-Step · 2026-05-17 · Sprint 0.5 Phase 2 fix verification<br>
+Source: <code>~/realtime-vision-control/docs/review/jetson_walking_step_by_step.html</code><br>
+Plan v5: <code>~/.claude/plans/happy-stirring-whisper.md</code> · Memory: <code>~/.claude/projects/.../memory/</code>
+</p>
+</footer>
+
+</div>
+
+<script>
+document.querySelectorAll('.copy-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const text = btn.getAttribute('data-copy') || btn.parentElement.textContent.replace(/^Copy\s*/, '');
+    try {
+      await navigator.clipboard.writeText(text);
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1200);
+    } catch (e) {
+      btn.textContent = 'Failed';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+    }
+  });
+});
+</script>
+
+</body>
+</html>

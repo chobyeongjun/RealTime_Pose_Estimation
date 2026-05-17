@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Sprint 0.5 — Hardware Audit + Critical Bug + NPZ Protocol</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Pretendard", "Inter", sans-serif; line-height: 1.65; color: #1a1a1a; background: #fafafa; margin: 0; }
+  .container { max-width: 1100px; margin: 0 auto; padding: 40px 32px; }
+  header { border-bottom: 3px solid #1a1a1a; padding-bottom: 24px; margin-bottom: 40px; }
+  h1 { font-size: 26px; margin: 0 0 8px 0; letter-spacing: -0.02em; }
+  .subtitle { color: #666; font-size: 15px; }
+  .meta { display: flex; gap: 16px; margin-top: 12px; font-size: 13px; color: #888; }
+  .meta span::before { content: "·"; margin-right: 8px; color: #ccc; }
+  .meta span:first-child::before { content: ""; margin: 0; }
+  h2 { font-size: 21px; margin-top: 48px; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid #ddd; }
+  h3 { font-size: 16px; margin-top: 24px; margin-bottom: 10px; }
+  .critical-banner {
+    background: linear-gradient(135deg, #991b1b 0%, #b91c1c 100%);
+    color: white;
+    padding: 22px 28px;
+    border-radius: 10px;
+    margin: 24px 0;
+    box-shadow: 0 4px 12px rgba(185, 28, 28, 0.25);
+  }
+  .critical-banner .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; opacity: 0.85; margin-bottom: 6px; }
+  .critical-banner .title { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+  .critical-banner .detail { font-size: 14px; opacity: 0.95; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge-bug { background: #fee2e2; color: #991b1b; }
+  .badge-ok { background: #d1fae5; color: #065f46; }
+  .badge-wait { background: #fef3c7; color: #92400e; }
+  .badge-info { background: #dbeafe; color: #1e40af; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 16px 0; }
+  .card { background: white; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px 18px; }
+  .card.exist { border-left: 4px solid #10b981; }
+  .card.wait  { border-left: 4px solid #f59e0b; }
+  .card.bug   { border-left: 4px solid #ef4444; }
+  .card h4 { margin: 0 0 6px 0; font-size: 14px; }
+  .card p { margin: 4px 0; font-size: 13px; color: #555; }
+  table { width: 100%; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; margin: 14px 0; font-size: 14px; }
+  th { background: #f3f4f6; padding: 10px 12px; text-align: left; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #555; }
+  td { padding: 10px 12px; border-top: 1px solid #f0f0f0; vertical-align: top; }
+  tr:hover td { background: #fafafa; }
+  pre { background: #1e1e1e; color: #e8e8e8; padding: 16px 18px; border-radius: 8px; overflow-x: auto; position: relative; font-family: "SF Mono", Menlo, monospace; font-size: 13px; line-height: 1.55; }
+  pre.with-copy { padding-top: 38px; }
+  .copy-btn { position: absolute; top: 8px; right: 8px; background: #333; color: #e0e0e0; border: 1px solid #444; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; font-family: -apple-system, sans-serif; }
+  .copy-btn:hover { background: #444; }
+  .copy-btn.copied { background: #065f46; color: #d1fae5; }
+  code:not(pre code) { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-family: "SF Mono", Menlo, monospace; font-size: 13px; }
+  .action-box { background: #fff7ed; border: 2px solid #fb923c; border-radius: 10px; padding: 20px 24px; margin: 24px 0; }
+  .action-box h3 { margin-top: 0; color: #9a3412; }
+  .action-box ol { margin: 10px 0; padding-left: 22px; }
+  .action-box li { padding: 4px 0; }
+  .impact-row { background: #fff5f5; }
+  .toc { background: white; border: 1px solid #e0e0e0; border-radius: 8px; padding: 18px 22px; margin-bottom: 32px; }
+  .toc ul { margin: 0; padding-left: 20px; columns: 2; column-gap: 24px; }
+  .toc li { padding: 3px 0; font-size: 13px; }
+  .toc a { color: #1a1a1a; text-decoration: none; }
+  .toc a:hover { color: #2563eb; text-decoration: underline; }
+  footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid #ddd; font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Sprint 0.5 — Hardware Audit + Critical Bug + NPZ Protocol</h1>
+  <div class="subtitle">기존 codebase 80% 발견 · 1 critical bug · Walking session unchanged · 10 NPZ metrics</div>
+  <div class="meta">
+    <span>2026-05-17</span>
+    <span>Paper 1 Sprint 0.5</span>
+    <span>ultrathink + codex audit</span>
+    <span>Pre-Sprint 1A</span>
+  </div>
+</header>
+
+<div class="critical-banner">
+  <div class="label">🚨 Critical Bug — Sprint 0.5 #1 Priority</div>
+  <div class="title">r_pulley discrepancy: 0.035m (correct) vs 0.130m (firmware, WRONG)</div>
+  <div class="detail">force_clamp.h 의 PULLEY_RADIUS_M 가 placeholder 0.130 (130mm) 로 남아 있음. 사용자 measured 35mm 와 3.7x 차이. 현재 cable 연결 시 motor torque limit 가 실제 보다 3.7x 큰 cable force 발휘 → 사용자 안전 위험.</div>
+</div>
+
+<div class="toc">
+  <strong style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #666;">Contents</strong>
+  <ul>
+    <li><a href="#existing">1. 이미 만들어진 것</a></li>
+    <li><a href="#bug">2. Critical Bug — r_pulley</a></li>
+    <li><a href="#walking">3. Walking Session — unchanged</a></li>
+    <li><a href="#npz">4. NPZ Analysis Protocol (10 metrics)</a></li>
+    <li><a href="#action">5. Today Action</a></li>
+  </ul>
+</div>
+
+<h2 id="existing">1. 이미 만들어진 것 (Codebase 80%)</h2>
+
+<p>Sprint 0.5 hardware audit 결과: <strong>paper 1 의 infrastructure 가 이미 약 80% 작동 상태</strong>. Sprint 1-3 의 control stack (admittance, slack, ILC, DOB) 만 추가하면 됨.</p>
+
+<div class="cards">
+<div class="card exist">
+<h4>Teensy Firmware <span class="badge badge-ok">Done</span></h4>
+<p><code>firmware/teensy_host_receiver/</code></p>
+<p>200Hz control + 100Hz telemetry + 2 watchdog + 5-layer force clamp + AK60 MIT mode (6 motors)</p>
+</div>
+
+<div class="card exist">
+<h4>Host Protocol <span class="badge badge-ok">Done</span></h4>
+<p><code>host_protocol.h</code></p>
+<p>CRC16-CCITT binary frame, 2Mbps USB, CommandBody (112B) + TelemetryBody (88B)</p>
+</div>
+
+<div class="card exist">
+<h4>C++ Headers <span class="badge badge-ok">Done</span></h4>
+<p><code>cpp/include/hwalker/</code></p>
+<p>shm_forecast_reader, shm_pose_v2_reader, force_clamp, control_types</p>
+</div>
+
+<div class="card exist">
+<h4>Python Bridge <span class="badge badge-ok">Done</span></h4>
+<p><code>scripts/teensy_protocol.py</code> + <code>shm_to_teensy_bridge.py</code></p>
+<p>Mock support, smoke test, protocol tests pass</p>
+</div>
+
+<div class="card exist">
+<h4>Walking Session <span class="badge badge-ok">Done</span></h4>
+<p><code>scripts/walking_session.sh</code></p>
+<p>5-phase: nvpmodel → SVO record → pipeline replay → trace analyze → Plan D offline</p>
+</div>
+
+<div class="card exist">
+<h4>NPZ Schema v2 <span class="badge badge-ok">Done</span></h4>
+<p><code>pipeline_main.py</code> --record-pose-npz</p>
+<p>t_s, hip_z_world_m, joint angles, inclinations, walker_user_distance, hip_world_vertical</p>
+</div>
+
+<div class="card exist">
+<h4>Analyzer <span class="badge badge-ok">Done</span></h4>
+<p><code>scripts/analyze_walking_results.py</code></p>
+<p>JSON + Markdown + PNG, auto-discover npz/trace/log, latency hist + joint plots</p>
+</div>
+
+<div class="card exist">
+<h4>Plan D Module <span class="badge badge-ok">Done</span></h4>
+<p><code>src/perception/plan_d_prototype/</code></p>
+<p>L1/L2/L3 EKF + Hilbert + divergence + cascade + predictor (215 tests pass)</p>
+</div>
+
+<div class="card wait">
+<h4>Control Stack <span class="badge badge-wait">TBD</span></h4>
+<p><code>src/control/</code> (Sprint 1-2)</p>
+<p>kinematics, reference, admittance, slack, dob, ilc, sim_full_loop</p>
+</div>
+
+<div class="card wait">
+<h4>Load Cell Driver <span class="badge badge-wait">TBD</span></h4>
+<p>Teensy ADC + filter (Sprint 3 spec 필요)</p>
+<p>Sampling rate, ADC bit, mounting position 미파악</p>
+</div>
+</div>
+
+<h2 id="bug">2. Critical Bug — r_pulley Discrepancy</h2>
+
+<p>3 곳에서 <code>r_pulley</code> 값이 일치하지 않음:</p>
+
+<table>
+<thead><tr><th>File</th><th>Line</th><th>Value</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td><code>configs/walker_geometry.yaml</code></td><td>13</td><td>0.035 m</td><td><span class="badge badge-ok">Correct (사용자 measured)</span></td></tr>
+<tr class="impact-row"><td><code>firmware/teensy_host_receiver/force_clamp.h</code></td><td>29</td><td><strong>0.130 m</strong></td><td><span class="badge badge-bug">WRONG (3.7x error)</span></td></tr>
+<tr class="impact-row"><td><code>firmware/teensy_host_receiver/README.md</code></td><td>88</td><td>0.130 m</td><td><span class="badge badge-bug">WRONG (doc)</span></td></tr>
+<tr><td><code>scripts/cable_kinematics.py</code></td><td>(uses YAML)</td><td>0.035 m</td><td><span class="badge badge-ok">Correct</span></td></tr>
+</tbody>
+</table>
+
+<h3>영향 분석</h3>
+
+<pre>force_clamp.h 식: tau_motor_Nm = tau_cable_N × PULLEY_RADIUS_M
+
+현재 (잘못 — 0.130m):
+   사용자가 "5 N pretension" 명령
+   → Teensy: 5N × 0.130m = 0.65 N·m motor torque
+   → 실제 cable force = 0.65 N·m ÷ 0.035m_실제 = <strong>18.6 N</strong>  ← 3.7x over
+
+수정 후 (0.035m):
+   5N × 0.035m = 0.175 N·m motor torque
+   실제 cable force = 0.175 / 0.035 = 5 N  ✓ 의도와 일치
+
+AK60 limit 도 잘못 계산:
+   현재: AK60_MAX_TAU_NM = 9.0 (= 70N × 0.130 가정)
+   현재 max cable force = 9.0 / 0.035 = <strong>257 N</strong>  ← 사용자 안전 위험!
+   수정: AK60_MAX_TAU_NM = 2.45 (= 70N × 0.035)
+        max cable = 70 N ✓</pre>
+
+<h3>수정 코드 (force_clamp.h)</h3>
+
+<pre class="with-copy"><button class="copy-btn" data-copy="inline constexpr float PULLEY_RADIUS_M      = 0.035f;   // motor pulley radius, walker_geometry.yaml 와 일치&#10;inline constexpr float AK60_MAX_TAU_NM      = 2.45f;    // = 70N cable max x 0.035m&#10;inline constexpr float AK60_MAX_TAU_CABLE_N = 70.0f;    // = AK60_MAX_TAU_NM / PULLEY_RADIUS_M&#10;inline constexpr float AK60_MAX_SLEW_NM_S   = 7.0f;     // cable 200N/s 기준 (5N pretension to 50N peak in 200ms = 225N/s 수준 < hardware)&#10;inline constexpr float PRETENSION_TAU_NM    = 0.175f;   // = 5N x 0.035m (사용자 spec, force band lower upper)">Copy</button>inline constexpr float PULLEY_RADIUS_M      = 0.035f;   // motor pulley radius, walker_geometry.yaml 와 일치
+inline constexpr float AK60_MAX_TAU_NM      = 2.45f;    // = 70N cable max × 0.035m
+inline constexpr float AK60_MAX_TAU_CABLE_N = 70.0f;    // = AK60_MAX_TAU_NM / PULLEY_RADIUS_M
+inline constexpr float AK60_MAX_SLEW_NM_S   = 7.0f;     // cable 200N/s 기준
+inline constexpr float PRETENSION_TAU_NM    = 0.175f;   // = 5N × 0.035m (사용자 spec)</pre>
+
+<h3>왜 이 bug 가 지금까지 안 잡혔나</h3>
+<ul>
+<li>Cable 미연결 운용 → motor torque 가 cable force 로 전달 안 됨</li>
+<li>Walking session 의 Phase 3 (pipeline replay) 만 사용 → motor 명령 안 보냄</li>
+<li>walker_geometry.yaml 의 0.035 는 vision/control 측 cable_length 계산용</li>
+<li>force_clamp.h 의 0.130 는 hardware 측 torque conversion (분리되어 있어 감지 안 됨)</li>
+</ul>
+
+<p>Sprint 3 (cable 연결 + bench test) 직전 까지는 *발견조차 안 되었을 가능성*. 지금 fix 가 critical.</p>
+
+<h2 id="walking">3. Walking Session — 수정 불필요</h2>
+
+<p><code>scripts/walking_session.sh</code> 현 상태 그대로 Sprint 0.5 의 Phase 2 fix 검증 가능. Phase 2 fix walking 의 목표 (Plan D ω convergence + cascade transition + invalid burst 검증) 에 필요한 모든 logging 이 이미 포함.</p>
+
+<h3>현 walking_session.sh 의 5 phase</h3>
+
+<table>
+<thead><tr><th>Phase</th><th>Output</th><th>목적</th></tr></thead>
+<tbody>
+<tr><td>1. nvpmodel + jetson_clocks</td><td>(performance mode)</td><td>GPU/CPU clock 최대</td></tr>
+<tr><td>2. ZED SVO record</td><td><code>walking_TS.svo2</code></td><td>raw stereo + IMU</td></tr>
+<tr><td>3. pipeline replay</td><td><code>walking_TS.npz</code> + <code>trace_TS.csv</code> + <code>plan_d_TS.log</code></td><td>NPZ v2 + T0-T4 latency + Plan D output</td></tr>
+<tr><td>4. analyze_trace</td><td><code>analyze_TS.txt</code></td><td>E2E latency stats</td></tr>
+<tr><td>5. Plan D offline + plot</td><td>PNG plots (cascade, ω, φ)</td><td>Plan D refinement evidence</td></tr>
+</tbody>
+</table>
+
+<h3>NPZ Schema v2 (Phase 2 fix 후 포함)</h3>
+
+<pre>Keys:
+  t_s                               (frame timestamp, s)
+  hip_z_world_m                     (gravity-projected hip vertical, ⭐ Phase 2)
+  hip_world_vertical                (per Codex consult #5)
+  left_hip_z, right_hip_z           (camera-frame hip y)
+  left_thigh_inclination_rad        (from world vertical, ⭐ Phase 2)
+  right_thigh_inclination_rad
+  left_shank_inclination_rad
+  right_shank_inclination_rad
+  left_hip_rad, right_hip_rad       (legacy)
+  left_knee_rad, right_knee_rad
+  walker_user_distance_m            (⭐ Phase 2)
+  valid                             (per-frame validity)
+  method                            (B = Method B IMU world frame)</pre>
+
+<h3>실행 명령</h3>
+
+<pre class="with-copy"><button class="copy-btn" data-copy="cd ~/realtime-vision-control&#10;bash scripts/walking_session.sh 60">Copy</button>cd ~/realtime-vision-control
+bash scripts/walking_session.sh 60</pre>
+
+<p>60초 보행 → <code>recordings/walking_TS/</code> 에 5 file 자동 저장.</p>
+
+<h3>Sprint 1B 이후 추가 logging (NOW 불필요)</h3>
+
+<ul>
+<li>☐ <code>ell_cable_left/right</code> — forward kinematics 구현 후 (Sprint 1B)</li>
+<li>☐ <code>F_meas_raw</code> — load cell 통합 후 (Sprint 3)</li>
+<li>☐ <code>cycle_index k</code> — ILC 통합 후 (Sprint 2)</li>
+<li>☐ <code>phi_fwd_value</code> — forecast publisher 확장</li>
+</ul>
+
+<h2 id="npz">4. NPZ Analysis Protocol — 10 Metric (10번 검토)</h2>
+
+<p>Phase 2 fix 검증 목적의 10 metric. 각 metric 의 source, pass criterion, fail action 명시.</p>
+
+<table>
+<thead><tr><th>#</th><th>Metric</th><th>Source</th><th>Pass</th><th>Fail action</th></tr></thead>
+<tbody>
+<tr><td><strong>M1</strong></td><td>Frame rate (fps)</td><td>NPZ <code>t_s</code> diff</td><td>&gt; 60 Hz (Track A 73, Track B 67)</td><td><code>jetson_clocks</code> 확인 + nvpmodel mode 0</td></tr>
+<tr><td><strong>M2</strong></td><td>Valid frame ratio</td><td>NPZ <code>valid.sum() / valid.size</code></td><td>&gt; 95%</td><td>YOLO confidence threshold tune</td></tr>
+<tr><td><strong>M3</strong></td><td>NPZ schema completeness</td><td>NPZ keys list</td><td>v2 의 15+ key 모두 존재</td><td><code>--record-pose-npz</code> + <code>--enable-plan-d</code> flag 확인</td></tr>
+<tr style="background:#fef3c7;"><td><strong>M4</strong> <span class="badge badge-info">Key</span></td><td>Plan D ω convergence</td><td>plan_d log + cascade trace</td><td>L1 → L2 transition &lt; 5s</td><td>Hilbert window 길이 조정</td></tr>
+<tr style="background:#fef3c7;"><td><strong>M5</strong> <span class="badge badge-info">Key</span></td><td>Cascade L3 ratio</td><td>analyze: <code>is_ready_true_ratio</code></td><td>&gt; 80% over 30-60s</td><td>EKF Q/R covariance tune</td></tr>
+<tr><td><strong>M6</strong></td><td>Phase φ continuity</td><td>run_plan_d_offline plot</td><td>adjacent diff &lt; π, no jumps</td><td>Divergence threshold + chi2 gate</td></tr>
+<tr><td><strong>M7</strong></td><td>Joint q[6] sanity</td><td>analyze: joints stats</td><td>std &lt; 0.3 rad, range OK</td><td>Calibration check, world_up_vec</td></tr>
+<tr style="background:#fef3c7;"><td><strong>M8</strong> <span class="badge badge-info">Key</span></td><td>Hip vertical periodicity</td><td>hip_z_world_m FFT</td><td>Peak at 1-2 Hz (cadence)</td><td>Phase 2 fix world_up 정확 확인</td></tr>
+<tr><td><strong>M9</strong></td><td>Invalid burst</td><td><code>analyze_invalid_bursts.py</code></td><td>median &lt; 5, max &lt; 30 frames</td><td>depth_hold 한계 조정</td></tr>
+<tr><td><strong>M10</strong></td><td>E2E latency</td><td><code>trace.csv</code></td><td>p50 &lt; 14ms, p99 &lt; 20ms</td><td>system-state.md 확인, Track 비교</td></tr>
+</tbody>
+</table>
+
+<p><strong>M4 + M5 + M8</strong> = Phase 2 fix 의 핵심 검증. 이 3 가지 모두 pass 면 Plan D EKF refinement 성공 → Sprint 1B (forward kinematics) 진입.</p>
+
+<h3>분석 명령 (one-liner)</h3>
+
+<pre class="with-copy"><button class="copy-btn" data-copy="cd ~/realtime-vision-control&#10;TS=$(ls -td recordings/walking_* | head -1 | xargs basename | sed 's/walking_//')&#10;PYTHONPATH=src python3 scripts/analyze_walking_results.py recordings/walking_${TS}/&#10;python3 scripts/analyze_invalid_bursts.py recordings/walking_${TS}/walking_${TS}.npz&#10;python3 scripts/visualize_ekf_learning.py recordings/walking_${TS}/walking_${TS}.npz">Copy</button>cd ~/realtime-vision-control
+TS=$(ls -td recordings/walking_* | head -1 | xargs basename | sed 's/walking_//')
+PYTHONPATH=src python3 scripts/analyze_walking_results.py recordings/walking_${TS}/
+python3 scripts/analyze_invalid_bursts.py recordings/walking_${TS}/walking_${TS}.npz
+python3 scripts/visualize_ekf_learning.py recordings/walking_${TS}/walking_${TS}.npz</pre>
+
+<h3>Output Mapping</h3>
+
+<table>
+<thead><tr><th>Output</th><th>Metric Coverage</th></tr></thead>
+<tbody>
+<tr><td><code>recordings/walking_TS/analysis.md</code></td><td>M1, M2, M3, M7, M10</td></tr>
+<tr><td><code>recordings/walking_TS/analysis.json</code></td><td>M1-M3, M7, M10 (machine-readable)</td></tr>
+<tr><td><code>recordings/walking_TS/joint_angles_deg.png</code></td><td>M7 visual</td></tr>
+<tr><td><code>recordings/walking_TS/hip_z_trajectory.png</code></td><td>M8 visual (FFT 별도)</td></tr>
+<tr><td><code>recordings/walking_TS/e2e_latency_hist.png</code></td><td>M10 visual</td></tr>
+<tr><td><code>recordings/walking_TS/*_planD_summary.npz</code> + plots</td><td>M4, M5, M6 visual</td></tr>
+<tr><td><code>analyze_invalid_bursts.py</code> stdout</td><td>M9</td></tr>
+</tbody>
+</table>
+
+<h2 id="action">5. Today Action — 결정 + 실행</h2>
+
+<div class="action-box">
+<h3>🔧 결정 필요 (사용자 confirm)</h3>
+<ol>
+<li><strong>r_pulley fix in force_clamp.h</strong>: 0.130 → 0.035, 동반 AK60_MAX_TAU_NM/PRETENSION_TAU_NM 도 정정. <em>지금 fix?</em> ☐ YES ☐ 추후</li>
+<li><strong>Walking session 실행</strong>: <code>bash scripts/walking_session.sh 60</code> — 현 상태로 진행? ☐ YES ☐ 사전 점검</li>
+<li><strong>10 NPZ metric protocol</strong>: 위 table 그대로 적용? ☐ YES ☐ 일부 변경</li>
+</ol>
+</div>
+
+<div class="action-box" style="background: #f0f9ff; border-color: #3b82f6;">
+<h3 style="color: #1e40af;">📝 실행 순서</h3>
+<ol>
+<li>[r_pulley fix YES 시] <code>force_clamp.h</code> + <code>README.md</code> 정정 + commit</li>
+<li>Jetson 에서 <code>git pull</code></li>
+<li><code>bash scripts/walking_session.sh 60</code> — 60초 walking 보행 녹화 + 분석</li>
+<li>recordings/walking_TS/ Mac 으로 scp</li>
+<li>Mac 에서 NPZ analysis 명령 실행 (위)</li>
+<li>10 metric pass/fail report 작성</li>
+<li>Sprint 1B (forward_kinematics.py TDD) 진입</li>
+</ol>
+</div>
+
+<footer>
+<p>
+Sprint 0.5 audit · 2026-05-17 · Hardware audit + critical bug + NPZ protocol<br>
+Source: <code>~/realtime-vision-control/docs/review/sprint_0_5_audit.html</code>
+</p>
+</footer>
+
+</div>
+
+<script>
+document.querySelectorAll('.copy-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const text = btn.getAttribute('data-copy') || btn.parentElement.textContent.replace(/^Copy\s*/, '');
+    try {
+      await navigator.clipboard.writeText(text);
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1200);
+    } catch (e) {
+      btn.textContent = 'Failed';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+    }
+  });
+});
+</script>
+
+</body>
+</html>
