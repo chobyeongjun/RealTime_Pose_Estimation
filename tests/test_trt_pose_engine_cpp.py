@@ -75,7 +75,19 @@ def main() -> int:
     test_img = rng.integers(0, 256, size=(600, 960, 3), dtype=np.uint8)
     result_cpp = eng_cpp.predict(test_img)
     print(f"  C++ result type: {type(result_cpp).__name__}")
-    print(f"  detected: {result_cpp.get('detected')}")
+    # PoseResult is a dataclass-like object; introspect generically
+    if hasattr(result_cpp, '__dict__'):
+        fields = list(vars(result_cpp).keys())[:10]
+        print(f"  result fields (first 10): {fields}")
+    if hasattr(result_cpp, 'detected'):
+        print(f"  detected: {result_cpp.detected}")
+    elif hasattr(result_cpp, 'valid'):
+        print(f"  valid: {result_cpp.valid}")
+    # Output tensor (pre-allocated, written by infer)
+    out = eng_cpp._output_tensor
+    print(f"  output_tensor shape: {tuple(out.shape)}")
+    print(f"  output_tensor finite: {torch.isfinite(out).all().item()}")
+    print(f"  output_tensor mean abs: {out.abs().mean().item():.4f}")
     print("  ✓ predict() ran OK")
     print()
 
