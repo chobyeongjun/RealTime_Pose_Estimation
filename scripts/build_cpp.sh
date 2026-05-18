@@ -62,10 +62,20 @@ else
     echo "    See cmake output above. Continuing with shm_v2_writer only."
 fi
 
+# Optional CUDA preprocess kernel (built only if CUDA detected) — Sprint 1 Phase 2 Week 3
+CUDA_PRE_SO=$(find . -name "hwalker_cuda_preprocess*.so" 2>/dev/null | head -1)
+if [ -n "$CUDA_PRE_SO" ]; then
+    cp -v "$CUDA_PRE_SO" "$INSTALL_DIR/"
+    echo -e "${GREEN}  ✓ CUDA preprocess kernel built and installed${NC}"
+else
+    echo -e "${YELLOW}  ⚠ CUDA preprocess kernel NOT built (CUDA Toolkit not detected)${NC}"
+fi
+
 echo ""
 echo -e "${GREEN}=== Build success ===${NC}"
-echo "  shm_v2_writer: $INSTALL_DIR/$(basename $SHM_SO)"
-[ -n "$TRT_SO" ] && echo "  trt_runner:    $INSTALL_DIR/$(basename $TRT_SO)"
+echo "  shm_v2_writer:    $INSTALL_DIR/$(basename $SHM_SO)"
+[ -n "$TRT_SO" ] && echo "  trt_runner:       $INSTALL_DIR/$(basename $TRT_SO)"
+[ -n "$CUDA_PRE_SO" ] && echo "  cuda_preprocess:  $INSTALL_DIR/$(basename $CUDA_PRE_SO)"
 echo ""
 echo "Test import:"
 echo "  cd $REPO_ROOT"

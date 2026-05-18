@@ -7,7 +7,7 @@
 # Output:
 #   build/hwalker_shm_v2_writer.cpython-310-aarch64-linux-gnu.so
 #   → installed to src/perception/realtime/ as Python import target
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)   # CUDA architectures property requires 3.18+
 project(hwalker_cpp CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -102,4 +102,34 @@ else()
     if(NOT CUDAToolkit_FOUND)
         message(WARNING "  CUDA Toolkit not found.")
     endif()
+endif()
+
+# ─── CUDA preprocess kernel — Sprint 1 Phase 2 Week 3 ─────────────────────
+# Needs CUDA language for .cu compilation.
+if(CUDAToolkit_FOUND)
+    enable_language(CUDA)
+    # Jetson Orin = compute capability 8.7 (sm_87)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES 87)
+    endif()
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+    pybind11_add_module(hwalker_cuda_preprocess
+        src/cuda_preprocess.cu
+        src/cuda_preprocess_binding.cpp
+    )
+    target_include_directories(hwalker_cuda_preprocess
+        PRIVATE include
+                ${CUDAToolkit_INCLUDE_DIRS}
+    )
+    target_link_libraries(hwalker_cuda_preprocess
+        PRIVATE CUDA::cudart
+    )
+    set_target_properties(hwalker_cuda_preprocess PROPERTIES
+        CUDA_SEPARABLE_COMPILATION OFF
+    )
+    message(STATUS "Built hwalker_cuda_preprocess (CUDA arch=${CMAKE_CUDA_ARCHITECTURES})")
+else()
+    message(WARNING "CUDA Toolkit not found — skipping hwalker_cuda_preprocess build.")
 endif()
