@@ -43,7 +43,7 @@ echo "  Frames: $FRAMES per condition"
 echo "  Output: $OUT_ROOT"
 echo "============================================================"
 
-su - "$ORIGINAL_USER" -c "cd $(pwd) && mkdir -p '$OUT_ROOT/inline' '$OUT_ROOT/async'"
+sudo -u "$ORIGINAL_USER" -- mkdir -p "$OUT_ROOT/inline" "$OUT_ROOT/async"
 
 # System state
 nvpmodel -m 0 2>&1 | sed 's/^/  /' || true
@@ -60,7 +60,7 @@ jetson_clocks 2>&1 | sed 's/^/  /' || true
         echo "  $tz ($type): $((temp/1000))°C"
     done
     echo ""
-    su - "$ORIGINAL_USER" -c "cd $(pwd) && git rev-parse --short HEAD && git branch --show-current"
+    sudo -u "$ORIGINAL_USER" -- bash -c "cd '$(pwd)' && git rev-parse --short HEAD && git branch --show-current"
 } > "$OUT_ROOT/system_state.txt" 2>&1
 chown "$ORIGINAL_USER:$ORIGINAL_USER" "$OUT_ROOT/system_state.txt"
 
@@ -85,8 +85,9 @@ run_cond() {
     cleanup_shm
     echo "  (cleaned /dev/shm/hwalker_*)"
 
-    su - "$ORIGINAL_USER" -c "
-        cd $(pwd)
+    # Use sudo -u (preserves environment correctly, unlike `su - -c`)
+    sudo -u "$ORIGINAL_USER" -- bash -c "
+        cd '$(pwd)' && \
         PYTHONPATH=src:src/perception/benchmarks timeout $((FRAMES / 30 + 120)) \
             python3 src/perception/realtime/pipeline_main.py \
                 --svo2 '$SVO_PATH' --method B --no-display \
@@ -94,7 +95,7 @@ run_cond() {
                 --record-pose-npz '$OUT_DIR/pose.npz' \
                 --enable-plan-d --enable-shm-v2 \
                 $FLAGS \
-                2>&1 | tee '$OUT_DIR/run.log' | tail -20
+                2>&1 | tee '$OUT_DIR/run.log' | tail -25
     "
     if [ -f "$OUT_DIR/trace.csv" ]; then
         local lines=$(wc -l < "$OUT_DIR/trace.csv")
