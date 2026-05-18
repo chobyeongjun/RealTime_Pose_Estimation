@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Build cpp/ extensions (Jetson).
+#
+# Output:
+#   build/hwalker_shm_v2_writer*.so   → installed to src/perception/realtime/
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+echo "=========================================="
+echo "Build C++ extensions"
+echo "  Repo: $REPO_ROOT"
+echo "=========================================="
+
+# Check pybind11 (pip install pybind11)
+if ! python3 -c "import pybind11" 2>/dev/null; then
+    echo -e "${YELLOW}pybind11 not installed. Installing...${NC}"
+    pip install --user pybind11
+fi
+
+# Check cmake
+if ! command -v cmake >/dev/null 2>&1; then
+    echo -e "${RED}cmake not found. Install: sudo apt-get install cmake${NC}"
+    exit 1
+fi
+
+BUILD_DIR="$REPO_ROOT/build/cpp"
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+
+echo ""
+echo "── cmake configure ──"
+cmake "$REPO_ROOT/cpp" -DCMAKE_BUILD_TYPE=Release
+
+echo ""
+echo "── cmake build ──"
+cmake --build . -j"$(nproc)"
+
+# Install: copy .so to src/perception/realtime/ so Python can import directly
+SO_FILE=$(find . -name "hwalker_shm_v2_writer*.so" | head -1)
+if [ -z "$SO_FILE" ]; then
+    echo -e "${RED}Build failed: hwalker_shm_v2_writer.so not produced${NC}"
+    exit 1
+fi
+
+INSTALL_DIR="$REPO_ROOT/src/perception/realtime"
+cp -v "$SO_FILE" "$INSTALL_DIR/"
+
+echo ""
+echo -e "${GREEN}=== Build success ===${NC}"
+echo "  .so: $INSTALL_DIR/$(basename $SO_FILE)"
+echo ""
+echo "Test import:"
+echo "  cd $REPO_ROOT"
+echo "  python3 -c 'from src.perception.realtime import hwalker_shm_v2_writer as w; print(w.Writer)'"
+echo ""
+echo "Run regression + benchmark:"
+echo "  PYTHONPATH=src python3 tests/test_shm_v2_writer_cpp.py"
