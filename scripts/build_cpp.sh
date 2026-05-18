@@ -43,14 +43,24 @@ echo "── cmake build ──"
 cmake --build . -j"$(nproc)"
 
 # Install: copy .so to src/perception/realtime/ so Python can import directly
-SO_FILE=$(find . -name "hwalker_shm_v2_writer*.so" | head -1)
-if [ -z "$SO_FILE" ]; then
+INSTALL_DIR="$REPO_ROOT/src/perception/realtime"
+
+SHM_SO=$(find . -name "hwalker_shm_v2_writer*.so" | head -1)
+if [ -z "$SHM_SO" ]; then
     echo -e "${RED}Build failed: hwalker_shm_v2_writer.so not produced${NC}"
     exit 1
 fi
+cp -v "$SHM_SO" "$INSTALL_DIR/"
 
-INSTALL_DIR="$REPO_ROOT/src/perception/realtime"
-cp -v "$SO_FILE" "$INSTALL_DIR/"
+# Optional TRT runner (built only if TensorRT detected)
+TRT_SO=$(find . -name "hwalker_trt_runner*.so" 2>/dev/null | head -1)
+if [ -n "$TRT_SO" ]; then
+    cp -v "$TRT_SO" "$INSTALL_DIR/"
+    echo -e "${GREEN}  ✓ TRT runner built and installed${NC}"
+else
+    echo -e "${YELLOW}  ⚠ TRT runner NOT built (TensorRT/CUDA not detected by cmake)${NC}"
+    echo "    See cmake output above. Continuing with shm_v2_writer only."
+fi
 
 echo ""
 echo -e "${GREEN}=== Build success ===${NC}"

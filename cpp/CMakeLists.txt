@@ -51,3 +51,55 @@ target_include_directories(hwalker_shm_v2_writer
 target_link_libraries(hwalker_shm_v2_writer
     PRIVATE rt   # POSIX shm_open requires librt on some systems
 )
+
+# ─── TRT inference runner — Sprint 1 Phase 2 Week 1 ───────────────────────
+# Detect TensorRT 10.x (Jetson installs to /usr/lib/aarch64-linux-gnu)
+find_path(TENSORRT_INCLUDE_DIR
+    NAMES NvInfer.h
+    HINTS /usr/include
+          /usr/include/aarch64-linux-gnu
+          /usr/include/x86_64-linux-gnu
+          /usr/local/tensorrt/include
+          /opt/nvidia/tensorrt/include
+)
+find_library(TENSORRT_INFER_LIB
+    NAMES nvinfer
+    HINTS /usr/lib/aarch64-linux-gnu
+          /usr/lib/x86_64-linux-gnu
+          /usr/local/tensorrt/lib
+          /opt/nvidia/tensorrt/lib
+)
+
+# CUDA toolkit (cudart for cudaStreamSynchronize)
+find_package(CUDAToolkit QUIET)
+
+if(TENSORRT_INCLUDE_DIR AND TENSORRT_INFER_LIB AND CUDAToolkit_FOUND)
+    message(STATUS "TensorRT found: ${TENSORRT_INFER_LIB}")
+    message(STATUS "TensorRT headers: ${TENSORRT_INCLUDE_DIR}")
+    message(STATUS "CUDA Toolkit: ${CUDAToolkit_VERSION}")
+
+    pybind11_add_module(hwalker_trt_runner
+        src/trt_runner.cpp
+        src/trt_binding.cpp
+    )
+    target_include_directories(hwalker_trt_runner
+        PRIVATE include
+                ${TENSORRT_INCLUDE_DIR}
+                ${CUDAToolkit_INCLUDE_DIRS}
+    )
+    target_link_libraries(hwalker_trt_runner
+        PRIVATE ${TENSORRT_INFER_LIB}
+                CUDA::cudart
+    )
+else()
+    message(WARNING "TensorRT or CUDA not found — skipping hwalker_trt_runner build.")
+    if(NOT TENSORRT_INCLUDE_DIR)
+        message(WARNING "  NvInfer.h not found. Install: sudo apt install libnvinfer-headers-dev")
+    endif()
+    if(NOT TENSORRT_INFER_LIB)
+        message(WARNING "  libnvinfer.so not found. Install: sudo apt install libnvinfer-dev")
+    endif()
+    if(NOT CUDAToolkit_FOUND)
+        message(WARNING "  CUDA Toolkit not found.")
+    endif()
+endif()
