@@ -396,7 +396,9 @@ class Pipeline:
         self._plan_d_async_stop = None
         if _is_async and self._predictor is not None:
             try:
+                print("[Pipeline] (async) importing plan_d_feeder...", flush=True)
                 from perception.realtime.plan_d_feeder import start_feeder_process
+                print("[Pipeline] (async) calling start_feeder_process()...", flush=True)
                 self._plan_d_async_proc, self._plan_d_async_queue, self._plan_d_async_stop = \
                     start_feeder_process(
                         forecast_shm_name='hwalker_forecast',
@@ -408,7 +410,22 @@ class Pipeline:
                     )
                 print(f"[Pipeline] Plan D async feeder spawned "
                       f"(pid={self._plan_d_async_proc.pid}, "
-                      f"queue_size=200, log=/tmp/plan_d_feeder.log)")
+                      f"queue_size=200, log=/tmp/plan_d_feeder.log)", flush=True)
+                # Sanity: give child up to 5s to start. We don't block on
+                # 'ready' since child runs forever, but log its alive state.
+                import time as _t
+                _t0 = _t.monotonic()
+                while _t.monotonic() - _t0 < 5.0:
+                    if not self._plan_d_async_proc.is_alive():
+                        print(f"[Pipeline][WARN] Plan D feeder died early "
+                              f"(exitcode={self._plan_d_async_proc.exitcode}). "
+                              f"See /tmp/plan_d_feeder.log + stderr.",
+                              flush=True)
+                        break
+                    _t.sleep(0.2)
+                print(f"[Pipeline] (async) feeder.is_alive()="
+                      f"{self._plan_d_async_proc.is_alive()} after 5s",
+                      flush=True)
                 # In async mode, parent process should NOT also run predictor
                 # locally — feeder owns it. Disable local predictor reference.
                 self._predictor_inline = self._predictor

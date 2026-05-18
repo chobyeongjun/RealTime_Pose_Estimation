@@ -68,11 +68,17 @@ def _feeder_main(
     NOTE: spawn context is used (not fork) to avoid inheriting parent's CUDA
     context. This means we need to re-setup sys.path manually.
     """
+    # ALL stderr (visible on parent's stderr when daemon=False)
+    sys.stderr.write(f"[feeder pid={os.getpid()}] ENTRY — _feeder_main\n")
+    sys.stderr.flush()
+
     # Re-setup sys.path (spawn does not inherit parent's path modifications)
     if pythonpath:
         for p in pythonpath.split(":"):
             if p and p not in sys.path:
                 sys.path.insert(0, p)
+    sys.stderr.write(f"[feeder pid={os.getpid()}] sys.path setup done\n")
+    sys.stderr.flush()
 
     # Setup logging in child
     if log_path:
@@ -84,19 +90,36 @@ def _feeder_main(
         )
     log = logging.getLogger("plan_d_feeder")
     log.info("Plan D feeder process started (pid=%d, spawn context)", os.getpid())
+    sys.stderr.write(f"[feeder pid={os.getpid()}] logging configured\n")
+    sys.stderr.flush()
 
+    sys.stderr.write(f"[feeder pid={os.getpid()}] about to import PlanDPredictor\n")
+    sys.stderr.flush()
     try:
         from perception.plan_d_prototype import PlanDPredictor
+        sys.stderr.write(f"[feeder pid={os.getpid()}] PlanDPredictor imported OK\n")
+        sys.stderr.flush()
     except ImportError as e:
+        sys.stderr.write(f"[feeder pid={os.getpid()}] PlanDPredictor import FAIL: {e}\n")
+        sys.stderr.write(f"[feeder] sys.path = {sys.path}\n")
+        sys.stderr.flush()
         log.error("PlanDPredictor import failed: %s (sys.path=%s)", e, sys.path)
         return
 
+    sys.stderr.write(f"[feeder pid={os.getpid()}] about to import ForecastPublisher\n")
+    sys.stderr.flush()
     try:
         from perception.realtime.forecast_publisher import ForecastPublisher
+        sys.stderr.write(f"[feeder pid={os.getpid()}] ForecastPublisher imported OK\n")
+        sys.stderr.flush()
     except ImportError:
         try:
             from src.perception.realtime.forecast_publisher import ForecastPublisher
+            sys.stderr.write(f"[feeder pid={os.getpid()}] ForecastPublisher imported (src.) OK\n")
+            sys.stderr.flush()
         except ImportError as e:
+            sys.stderr.write(f"[feeder pid={os.getpid()}] ForecastPublisher import FAIL: {e}\n")
+            sys.stderr.flush()
             log.error("ForecastPublisher import failed: %s", e)
             return
 
