@@ -64,7 +64,8 @@ fi
 
 echo ""
 echo -e "${GREEN}=== Build success ===${NC}"
-echo "  .so: $INSTALL_DIR/$(basename $SO_FILE)"
+echo "  shm_v2_writer: $INSTALL_DIR/$(basename $SHM_SO)"
+[ -n "$TRT_SO" ] && echo "  trt_runner:    $INSTALL_DIR/$(basename $TRT_SO)"
 echo ""
 echo "Test import:"
 echo "  cd $REPO_ROOT"

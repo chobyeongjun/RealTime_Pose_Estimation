@@ -172,6 +172,8 @@ def _feeder_main(
             )
             forecast = predictor.forecast(tau_s=tau_s)
 
+            # CRITICAL: must match pipeline_main.py inline path args exactly
+            # (Codex P2 fix). Different defaults change control behavior.
             forecast_pub.publish(
                 frame_id=msg.frame_id,
                 publish_done_mono_ns=time.monotonic_ns(),
@@ -180,9 +182,17 @@ def _feeder_main(
                 cascade_level=int(predictor.level),
                 stride_count=int(predictor.stride_count),
                 template_touched_fraction=float(predictor.template_touched_fraction),
-                is_ready_for_control=predictor.is_ready_for_control(),
-                hs_event_L=predictor.predict_heel_strike("L"),
-                hs_event_R=predictor.predict_heel_strike("R"),
+                is_ready_for_control=bool(predictor.is_ready_for_control(
+                    require_l3=False,
+                    max_sigma_phi=2.0,
+                    max_ambiguity=0.9,
+                )),
+                hs_event_L=predictor.predict_heel_strike(
+                    "L", max_t_ahead_s=2.0, min_omega_rad_s=1.0,
+                ),
+                hs_event_R=predictor.predict_heel_strike(
+                    "R", max_t_ahead_s=2.0, min_omega_rad_s=1.0,
+                ),
             )
         except Exception as e:
             n_errors += 1
