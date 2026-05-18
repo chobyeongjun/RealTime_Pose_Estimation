@@ -6,15 +6,26 @@
 // with a single fused kernel that produces float32 NCHW RGB letterboxed output
 // in one pass.
 //
-// Letterbox geometry:
-//   scale  = min(imgsz/h, imgsz/w)
-//   new_h, new_w = round(h * scale), round(w * scale)
+// Letterbox geometry (MUST match torch reference bit-equally):
+//   scale  = min(imgsz/h, imgsz/w)            ← computed in DOUBLE on host
+//   new_h, new_w = int(h * scale), int(w * scale)
 //   pad_h, pad_w = (imgsz - new_h) / 2, (imgsz - new_w) / 2
 //   Pixels outside letterbox region → 114/255 (matches torch _pad_tensor).
 //
-// Bilinear interpolation uses the "half-pixel center" convention to match
-// torch.nn.functional.interpolate(..., mode='bilinear', align_corners=False):
-//   src = (out + 0.5) / scale - 0.5
+// Bilinear interpolation matches torch.nn.functional.interpolate(
+//   size=(new_h, new_w), mode='bilinear', align_corners=False) which uses:
+//   - Per-axis effective ratio (NOT the letterbox scale): scale_y = in_h / new_h,
+//     scale_x = in_w / new_w (after truncation).
+//   - Half-pixel center: src = (out + 0.5) * scale - 0.5
+//   - Source coord CLAMPED to [0, in-1] BEFORE computing weights (dy, dx).
+//     Without clamping, upsizes (in < out) miscompute the top/left border.
+//
+// Threading: one thread per output (channel, y, x). Block (16, 16, 1) = 256.
+//
+// Concurrency contract: CudaPreprocessor owns a single d_staging_ buffer.
+// Caller MUST serialize process() calls on a single stream OR synchronize
+// the previous call's stream before the next process() call. Multi-stream
+// concurrent use is NOT supported (would race on d_staging_).
 #include "hwalker/cuda_preprocess.hpp"
 
 #include <cuda_runtime.h>
@@ -38,7 +49,8 @@ __global__ void preprocess_letterbox_kernel(
     int out_size,
     int pad_h, int pad_w,
     int new_h, int new_w,
-    float inv_scale)   // 1.0 / scale
+    float scale_y,    // per-axis: (float)in_h / (float)new_h
+    float scale_x)    // per-axis: (float)in_w / (float)new_w
 {
     const int out_x = blockIdx.x * blockDim.x + threadIdx.x;
     const int out_y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -57,22 +69,25 @@ __global__ void preprocess_letterbox_kernel(
         return;
     }
 
-    // Half-pixel center bilinear coord (matches torch align_corners=False)
-    const float src_y = (region_y + 0.5f) * inv_scale - 0.5f;
-    const float src_x = (region_x + 0.5f) * inv_scale - 0.5f;
+    // Per-axis half-pixel center bilinear coord (matches torch align_corners=False).
+    // CRITICAL: clamp src_y/src_x to [0, in-1] BEFORE computing weights, so
+    // dy/dx are zero at the border (matches torch behavior for upsize).
+    float src_y = (region_y + 0.5f) * scale_y - 0.5f;
+    float src_x = (region_x + 0.5f) * scale_x - 0.5f;
+    if (src_y < 0.0f) src_y = 0.0f;
+    if (src_x < 0.0f) src_x = 0.0f;
+    const float in_h_f = (float)(in_h - 1);
+    const float in_w_f = (float)(in_w - 1);
+    if (src_y > in_h_f) src_y = in_h_f;
+    if (src_x > in_w_f) src_x = in_w_f;
 
-    // Clamped neighbor indices
     int y0 = (int)floorf(src_y);
     int x0 = (int)floorf(src_x);
-    if (y0 < 0) y0 = 0;
-    if (x0 < 0) x0 = 0;
-    if (y0 >= in_h) y0 = in_h - 1;
-    if (x0 >= in_w) x0 = in_w - 1;
-    int y1 = y0 + 1; if (y1 >= in_h) y1 = in_h - 1;
-    int x1 = x0 + 1; if (x1 >= in_w) x1 = in_w - 1;
+    int y1 = y0 + 1; if (y1 > in_h - 1) y1 = in_h - 1;
+    int x1 = x0 + 1; if (x1 > in_w - 1) x1 = in_w - 1;
 
-    const float dy = src_y - floorf(src_y);
-    const float dx = src_x - floorf(src_x);
+    const float dy = src_y - (float)y0;
+    const float dx = src_x - (float)x0;
 
     // Input layout: row-major H x W x C (BGR or BGRA).
     // Channel swap: output_c R(0) = input_c 2, G(1) = 1, B(2) = 0  ⇒  in_c = 2 - out_c
@@ -167,7 +182,10 @@ bool CudaPreprocessor::process(
 
     cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_handle);
 
-    // H2D copy on stream (pageable memory → blocks host briefly but enqueues stream op)
+    // Lifetime contract: input_host_ptr must remain valid until this function
+    // returns. For pageable memory + cudaMemcpyAsync, CUDA stages internally
+    // before returning to host, so post-return modification is safe. For PINNED
+    // memory, caller must keep buffer alive until stream sync.
     cudaError_t err = cudaMemcpyAsync(
         d_staging_, input_host_ptr, input_bytes,
         cudaMemcpyHostToDevice, stream);
@@ -176,14 +194,30 @@ bool CudaPreprocessor::process(
         return false;
     }
 
-    // Letterbox parameters (must match torch reference exactly)
-    const float scale = std::min(static_cast<float>(imgsz_) / h,
-                                  static_cast<float>(imgsz_) / w);
-    const int new_h = static_cast<int>(h * scale);
-    const int new_w = static_cast<int>(w * scale);
+    // P1.3 fix: Letterbox geometry in DOUBLE (matches Python double).
+    // Float32 diverges on edge cases like 300x301 → (637,639) vs Python (637,640).
+    const double scale_d = std::min(
+        static_cast<double>(imgsz_) / static_cast<double>(h),
+        static_cast<double>(imgsz_) / static_cast<double>(w));
+    const int new_h = static_cast<int>(static_cast<double>(h) * scale_d);
+    const int new_w = static_cast<int>(static_cast<double>(w) * scale_d);
     const int pad_h = (imgsz_ - new_h) / 2;
     const int pad_w = (imgsz_ - new_w) / 2;
-    const float inv_scale = 1.0f / scale;
+
+    // P1.1 fix: Per-axis effective scale (NOT 1/letterbox_scale).
+    // Matches torch F.interpolate(size=(new_h, new_w)) behavior.
+    const float scale_y = static_cast<float>(static_cast<double>(h) / static_cast<double>(new_h));
+    const float scale_x = static_cast<float>(static_cast<double>(w) / static_cast<double>(new_w));
+
+    // Defensive: new_h/new_w should fit in imgsz. If not, parameters are wrong.
+    if (new_h <= 0 || new_w <= 0 || pad_h < 0 || pad_w < 0 ||
+        new_h + pad_h > imgsz_ || new_w + pad_w > imgsz_) {
+        std::fprintf(stderr,
+            "[CudaPreprocessor] letterbox geometry invalid: "
+            "h=%d w=%d imgsz=%d new=(%d,%d) pad=(%d,%d)\n",
+            h, w, imgsz_, new_h, new_w, pad_h, pad_w);
+        return false;
+    }
 
     // Grid: 16x16 threads/block × (S/16, S/16, 3) blocks
     const dim3 block(16, 16, 1);
@@ -197,7 +231,7 @@ bool CudaPreprocessor::process(
         d_staging_, h, w, channels,
         output_gpu_ptr, imgsz_,
         pad_h, pad_w, new_h, new_w,
-        inv_scale
+        scale_y, scale_x
     );
 
     err = cudaGetLastError();

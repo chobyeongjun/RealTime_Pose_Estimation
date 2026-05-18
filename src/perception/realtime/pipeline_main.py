@@ -316,10 +316,17 @@ class Pipeline:
         if _HAS_DIRECT_TRT and not self.args.no_trt:
             engine_path = os.path.join(_model_dir, f'yolo26s-lower6-v2-{imgsz}.engine')
             use_cpp_trt = getattr(self.args, 'use_cpp_trt', False)
-            print(f"[Pipeline] DirectTRT 모드 (imgsz={imgsz}"
-                  f"{', C++ runner' if use_cpp_trt else ''})")
+            use_cuda_preprocess = getattr(self.args, 'use_cuda_preprocess', False)
+            extras = []
+            if use_cpp_trt:
+                extras.append("C++ runner")
+            if use_cuda_preprocess:
+                extras.append("CUDA preprocess")
+            extra_str = f", {' + '.join(extras)}" if extras else ""
+            print(f"[Pipeline] DirectTRT 모드 (imgsz={imgsz}{extra_str})")
             self.model = TRTPoseEngine(engine_path, imgsz=imgsz,
-                                       use_cpp_trt=use_cpp_trt)
+                                       use_cpp_trt=use_cpp_trt,
+                                       use_cuda_preprocess=use_cuda_preprocess)
             self.model.load()
             self._use_direct_trt = True
         else:
@@ -1481,10 +1488,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--use-cpp-trt", dest="use_cpp_trt", action="store_true",
         help="Use hwalker_trt_runner C++ extension for TRT inference call.\n"
-             "  Drop-in replacement for Python TRT context.execute_async_v3().\n"
-             "  Preprocess + postprocess paths unchanged.\n"
-             "  Build first: scripts/build_cpp.sh (Jetson, TensorRT 10.3 detect).\n"
-             "  Expected gain: ~2 ms (Python TRT API wrap removed).",
+             "  ⚠ ABORTED: premise wrong, gain +0.006ms (Python TRT API is\n"
+             "  a thin shim, no overhead to remove). Kept opt-in for regression\n"
+             "  testing; do NOT enable in production.",
+    )
+    # ── Sprint 1 Phase 2 Week 3: CUDA preprocess kernel ────────────────
+    parser.add_argument(
+        "--use-cuda-preprocess", dest="use_cuda_preprocess", action="store_true",
+        help="Use hwalker_cuda_preprocess (fused CUDA kernel) instead of torch op\n"
+             "  chain for preprocess. Replaces numpy→cuda + channel_swap + permute +\n"
+             "  float/div + interpolate + copy_pad + slice_assign with one kernel.\n"
+             "  Premise validated: torch preprocess p50 = 1.62 ms.\n"
+             "  Target: kernel p50 < 0.5 ms (-1.0~1.3 ms gain).\n"
+             "  Build first: scripts/build_cpp.sh (Jetson, CUDA Toolkit required).",
     )
     # ── Sprint 1 Phase 1 A.1: Plan D async separation ──────────────────
     parser.add_argument(

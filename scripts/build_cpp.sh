@@ -36,7 +36,14 @@ cd "$BUILD_DIR"
 
 echo ""
 echo "── cmake configure ──"
-cmake "$REPO_ROOT/cpp" -DCMAKE_BUILD_TYPE=Release
+# CUDA architecture override (Jetson Orin = 87, Xavier = 72, Ampere x86 = 86)
+# Set CUDA_ARCH env var to override: CUDA_ARCH=72 bash scripts/build_cpp.sh
+CMAKE_EXTRA=""
+if [ -n "${CUDA_ARCH:-}" ]; then
+    CMAKE_EXTRA="-DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH"
+    echo "  CUDA arch override: $CUDA_ARCH"
+fi
+cmake "$REPO_ROOT/cpp" -DCMAKE_BUILD_TYPE=Release $CMAKE_EXTRA
 
 echo ""
 echo "── cmake build ──"
