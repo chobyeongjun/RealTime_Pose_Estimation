@@ -61,8 +61,19 @@ def _feeder_main(
     fs_hz: float,
     tau_s: float,
     log_path: Optional[str] = None,
+    pythonpath: Optional[str] = None,
 ) -> None:
-    """Run inside child process. Consumes queue, runs Plan D, publishes forecast."""
+    """Run inside child process. Consumes queue, runs Plan D, publishes forecast.
+
+    NOTE: spawn context is used (not fork) to avoid inheriting parent's CUDA
+    context. This means we need to re-setup sys.path manually.
+    """
+    # Re-setup sys.path (spawn does not inherit parent's path modifications)
+    if pythonpath:
+        for p in pythonpath.split(":"):
+            if p and p not in sys.path:
+                sys.path.insert(0, p)
+
     # Setup logging in child
     if log_path:
         logging.basicConfig(
@@ -72,12 +83,12 @@ def _feeder_main(
             force=True,
         )
     log = logging.getLogger("plan_d_feeder")
-    log.info("Plan D feeder process started (pid=%d)", os.getpid())
+    log.info("Plan D feeder process started (pid=%d, spawn context)", os.getpid())
 
     try:
         from perception.plan_d_prototype import PlanDPredictor
     except ImportError as e:
-        log.error("PlanDPredictor import failed: %s", e)
+        log.error("PlanDPredictor import failed: %s (sys.path=%s)", e, sys.path)
         return
 
     try:
@@ -88,6 +99,18 @@ def _feeder_main(
         except ImportError as e:
             log.error("ForecastPublisher import failed: %s", e)
             return
+
+    # Force-unlink any stale forecast SHM (from prior inline run or crashed process)
+    try:
+        from multiprocessing import shared_memory
+        stale = shared_memory.SharedMemory(name=forecast_shm_name)
+        stale.close()
+        stale.unlink()
+        log.info("Unlinked stale /%s before create", forecast_shm_name)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning("Stale SHM unlink failed (continuing): %s", e)
 
     # Initialize predictor + forecast publisher
     predictor = PlanDPredictor(n_joints=n_joints, fs_hz=fs_hz)
@@ -180,18 +203,24 @@ def start_feeder_process(
                 pass  # drop frame
         stop_feeder(proc, q, stop)
     """
-    ctx = mp.get_context("fork")  # Linux only, much faster than spawn
+    # IMPORTANT: spawn (NOT fork). fork() inherits parent's CUDA context
+    # (from ZED SDK + TRT engine), which breaks in the child process.
+    # spawn restarts a fresh Python interpreter — slower (~1s start) but safe.
+    ctx = mp.get_context("spawn")
     in_queue: "mp.Queue[FeedMessage]" = ctx.Queue(maxsize=queue_size)
     stop_event = ctx.Event()
 
+    # Pass current sys.path to child (spawn doesn't inherit)
+    pythonpath = ":".join(p for p in sys.path if p and p != ".")
+
     proc = ctx.Process(
         target=_feeder_main,
-        args=(in_queue, stop_event, forecast_shm_name, n_joints, fs_hz, tau_s, log_path),
-        daemon=True,
+        args=(in_queue, stop_event, forecast_shm_name, n_joints, fs_hz, tau_s, log_path, pythonpath),
+        daemon=False,  # spawn + daemon=True can cause join issues
         name="PlanDFeeder",
     )
     proc.start()
-    LOGGER.info("Plan D feeder process started (pid=%d)", proc.pid)
+    LOGGER.info("Plan D feeder process started (pid=%d, spawn context)", proc.pid)
     return proc, in_queue, stop_event
 
 

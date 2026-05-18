@@ -64,6 +64,15 @@ jetson_clocks 2>&1 | sed 's/^/  /' || true
 } > "$OUT_ROOT/system_state.txt" 2>&1
 chown "$ORIGINAL_USER:$ORIGINAL_USER" "$OUT_ROOT/system_state.txt"
 
+cleanup_shm() {
+    # Force clean ALL hwalker_* SHM between conditions (prevent state pollution)
+    rm -f /dev/shm/hwalker_pose /dev/shm/hwalker_pose_v2 \
+          /dev/shm/hwalker_pose_cuda /dev/shm/hwalker_forecast 2>/dev/null
+    # Kill any zombie processes
+    pkill -9 -f plan_d_feeder 2>/dev/null
+    sleep 1
+}
+
 run_cond() {
     local LABEL="$1"
     local FLAGS="$2"
@@ -71,16 +80,21 @@ run_cond() {
     echo ""
     echo "── $LABEL ──"
     echo "  Flags: $FLAGS"
+
+    # CRITICAL: clean SHM before each condition to avoid stale state
+    cleanup_shm
+    echo "  (cleaned /dev/shm/hwalker_*)"
+
     su - "$ORIGINAL_USER" -c "
         cd $(pwd)
-        PYTHONPATH=src:src/perception/benchmarks timeout $((FRAMES / 30 + 90)) \
+        PYTHONPATH=src:src/perception/benchmarks timeout $((FRAMES / 30 + 120)) \
             python3 src/perception/realtime/pipeline_main.py \
                 --svo2 '$SVO_PATH' --method B --no-display \
                 --trace-csv '$OUT_DIR/trace.csv' \
                 --record-pose-npz '$OUT_DIR/pose.npz' \
                 --enable-plan-d --enable-shm-v2 \
                 $FLAGS \
-                2>&1 | tee '$OUT_DIR/run.log' | tail -15
+                2>&1 | tee '$OUT_DIR/run.log' | tail -20
     "
     if [ -f "$OUT_DIR/trace.csv" ]; then
         local lines=$(wc -l < "$OUT_DIR/trace.csv")
