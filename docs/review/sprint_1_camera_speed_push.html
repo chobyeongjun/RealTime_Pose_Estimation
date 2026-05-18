@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Sprint 1 — Camera Speed Push (5 Path 적용)</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Pretendard", "Inter", sans-serif; line-height: 1.65; color: #1a1a1a; background: #fafafa; margin: 0; }
+  .container { max-width: 1100px; margin: 0 auto; padding: 40px 32px; }
+  header { border-bottom: 3px solid #1a1a1a; padding-bottom: 24px; margin-bottom: 36px; }
+  h1 { font-size: 26px; margin: 0 0 8px 0; }
+  .subtitle { color: #666; font-size: 15px; }
+  .meta { display: flex; gap: 16px; margin-top: 12px; font-size: 13px; color: #888; }
+  .meta span::before { content: "·"; margin-right: 8px; color: #ccc; }
+  .meta span:first-child::before { content: ""; margin: 0; }
+  h2 { font-size: 21px; margin-top: 40px; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid #ddd; }
+  h3 { font-size: 16px; margin-top: 24px; margin-bottom: 10px; }
+  .goal-banner {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    color: white;
+    padding: 22px 28px;
+    border-radius: 10px;
+    margin: 20px 0;
+  }
+  .goal-banner .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: #94a3b8; margin-bottom: 6px; }
+  .goal-banner .title { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+  .goal-banner .detail { font-size: 14px; opacity: 0.95; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .badge-now { background: #fed7aa; color: #9a3412; }
+  .badge-next { background: #dbeafe; color: #1e40af; }
+  .badge-later { background: #e5e7eb; color: #4b5563; }
+  .badge-key { background: #fef3c7; color: #92400e; }
+  table { width: 100%; border-collapse: collapse; background: white; border-radius: 6px; overflow: hidden; margin: 14px 0; font-size: 14px; }
+  th { background: #f3f4f6; padding: 10px 12px; text-align: left; font-weight: 600; font-size: 12px; text-transform: uppercase; color: #555; }
+  td { padding: 10px 12px; border-top: 1px solid #f0f0f0; vertical-align: top; }
+  tr:hover td { background: #fafafa; }
+  pre { background: #1e1e1e; color: #e8e8e8; padding: 14px 18px; border-radius: 8px; overflow-x: auto; font-family: "SF Mono", Menlo, monospace; font-size: 13px; line-height: 1.55; margin: 12px 0; }
+  code:not(pre code) { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-family: "SF Mono", Menlo, monospace; font-size: 13px; }
+  .step-card {
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin: 14px 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .step-card h3 { margin-top: 0; display: flex; align-items: center; gap: 12px; }
+  .step-num {
+    background: #1a1a1a;
+    color: white;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 28px;
+    font-weight: 700;
+    font-size: 13px;
+    display: inline-block;
+  }
+  .step-meta { font-size: 12px; color: #888; margin: 4px 0 8px 0; }
+  .step-roles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  .role-box { padding: 10px 14px; border-radius: 6px; font-size: 13px; }
+  .role-claude { background: #ede9fe; border-left: 3px solid #6366f1; }
+  .role-user { background: #fef3c7; border-left: 3px solid #f59e0b; }
+  .role-box h4 { margin: 0 0 6px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #555; }
+  .latency-target {
+    background: #ecfdf5;
+    border-left: 4px solid #10b981;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-top: 10px;
+  }
+  .latency-target strong { color: #065f46; }
+  .summary-box {
+    background: #fff7ed;
+    border: 2px solid #fb923c;
+    border-radius: 10px;
+    padding: 18px 24px;
+    margin: 24px 0;
+  }
+  .summary-box h3 { margin-top: 0; color: #9a3412; }
+  footer { margin-top: 50px; padding-top: 24px; border-top: 1px solid #ddd; font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Sprint 1 — Camera Speed Push (5 Path)</h1>
+  <div class="subtitle">19.8ms → 9-11ms · Paper claim "sub-15ms + per-keypoint uncertainty" · 5-7주</div>
+  <div class="meta">
+    <span>2026-05-18 시작</span>
+    <span>Path 1 결정 (사용자 "기간 무관, 기술 한계 까지")</span>
+    <span>EKF 는 Sprint 2 로</span>
+    <span>Daily 3시간</span>
+  </div>
+</header>
+
+<div class="goal-banner">
+  <div class="label">Goal</div>
+  <div class="title">정확한 데이터 인식 + 병목 최대 제거 + 진짜 한계 latency</div>
+  <div class="detail">현재 Track B p99 19.8ms → 목표 9-11ms (engine floor 8.48ms 의 ~30% margin 까지). Paper claim 강화: "sub-15ms vision-to-actuator with per-keypoint depth uncertainty propagation". ZED SDK RawBuffer + sparse stereo = paper 의 unique technical contribution.</div>
+</div>
+
+<h2>현 상태 → 목표</h2>
+
+<table>
+<thead><tr><th>Stage</th><th>현재</th><th>목표</th><th>적용 Path</th></tr></thead>
+<tbody>
+<tr><td>ZED capture (RGB+depth)</td><td>~1-2 ms (PERFORMANCE depth)</td><td>~0.5 ms</td><td>E (RawBuffer, dense depth 제거)</td></tr>
+<tr><td>Preprocess (CPU→GPU)</td><td>~2.5 ms</td><td>~0.5 ms</td><td>A (zero-copy) + C (CUDA kernel)</td></tr>
+<tr><td>TRT infer</td><td>~13-15 ms (Python wrap)</td><td>~9 ms (floor 8.48 + 0.5 margin)</td><td>B (C++ wrapper)</td></tr>
+<tr><td>Postprocess (2D→3D + bone)</td><td>~1-2 ms (dense depth lookup)</td><td>~0.5 ms (sparse stereo only)</td><td>E (sparse stereo) + B</td></tr>
+<tr><td>SHM write</td><td>~0.75 ms</td><td>~0.3 ms</td><td>B (C++)</td></tr>
+<tr><td><strong>End-to-end p99</strong></td><td><strong>19.8 ms</strong></td><td><strong>9-11 ms</strong></td><td>5 path 합</td></tr>
+</tbody>
+</table>
+
+<h2>9-Step Roadmap (~5-7주)</h2>
+
+<div class="step-card">
+<h3><span class="step-num">1</span> Codebase audit + branch setup <span class="badge badge-now">Now</span></h3>
+<div class="step-meta">1-2일 · 모든 path 의 starting point 식별</div>
+
+<p><strong>Targets</strong>:</p>
+<ul>
+<li><code>cpp/include/hwalker/</code> 의 기존 headers 검토 (이미 존재)</li>
+<li><code>scripts/cable_kinematics.py</code> 같은 Python 코드 의 의존성 mapping</li>
+<li>Track B 의 4-stream architecture 의 entry point</li>
+<li>ZED SDK pyzed.sl 의 GPU memory access API 조사</li>
+<li><code>postprocess_accel</code> 의 현재 C++ extension 구조</li>
+</ul>
+
+<div class="step-roles">
+<div class="role-box role-claude">
+<h4>Claude</h4>
+<ul style="margin:0; padding-left: 16px;">
+<li>Codebase 의 모든 cpp/, scripts/ 매핑</li>
+<li>의존 graph 작성</li>
+<li>New branch <code>feature/sprint_1_camera_speed</code> setup</li>
+<li>Audit 결과 HTML</li>
+</ul>
+</div>
+<div class="role-box role-user">
+<h4>사용자</h4>
+<ul style="margin:0; padding-left: 16px;">
+<li>Audit HTML review</li>
+<li>Step 2 진행 confirm</li>
+</ul>
+</div>
+</div>
+</div>
+
+<div class="step-card">
+<h3><span class="step-num">2</span> ZED RawBuffer 실험 (E의 핵심) <span class="badge badge-next">Next</span></h3>
+<div class="step-meta">2-3일 · ZED SDK 의 raw L/R buffer access 확인</div>
+
+<p><strong>Goal</strong>: ZED SDK 의 dense depth (PERFORMANCE mode) 우회 + raw stereo image 직접 access.</p>
+
+<pre>ZED SDK API (Stereolabs docs):
+  zed.retrieve_image(mat, sl.VIEW.LEFT_GRAY, sl.MEM.GPU)
+  zed.retrieve_image(mat, sl.VIEW.RIGHT_GRAY, sl.MEM.GPU)
+  → 2 image, GPU memory pointer
+  → Dense depth 계산 안 함
+
+→ Engine floor 의 5-8ms gain (SGM dense depth 계산 시간)</pre>
+
+<div class="step-roles">
+<div class="role-box role-claude">
+<h4>Claude (Mac side)</h4>
+<ul style="margin:0; padding-left: 16px;">
+<li>pyzed.sl API 의 GPU memory pointer test code</li>
+<li>5/18 SVO 으로 RGB+depth vs Raw L/R 비교 script</li>
+<li>Latency 측정 framework</li>
+</ul>
+</div>
+<div class="role-box role-user">
+<h4>사용자 (Jetson)</h4>
+<ul style="margin:0; padding-left: 16px;">
+<li>Test script 실행 (~10분)</li>
+<li>Latency 결과 paste</li>
+</ul>
+</div>
+</div>
+
+<div class="latency-target">
+<strong>Success criterion</strong>: ZED capture stage 의 latency 1-2ms → 0.5ms (dense depth 안 함)
+</div>
+</div>
+
+<div class="step-card">
+<h3><span class="step-num">3</span> Sparse stereo CUDA kernel (E) <span class="badge badge-later">Later</span></h3>
+<div class="step-meta">1-2주 · Custom CUDA kernel for 6-keypoint depth</div>
+
+<p><strong>Goal</strong>: 6 keypoint (L/R hip/knee/ankle) 의 sparse stereo matching. Dense SGM 대체.</p>
+
+<pre>Sparse stereo algorithm:
+  Input: L_image (GPU), R_image (GPU), 6 keypoint pixel (x_l, y_l)
+
+  For each keypoint:
+    1. Patch around (x_l, y_l) — 24×24 window in L_image
+    2. Search in R_image along epipolar line
+    3. Sub-pixel disparity refinement (parabolic fit)
+    4. Z = fx × baseline / disparity
+    5. σ_Z = Z² × σ_disparity / (fx × baseline)  ← per-kp uncertainty!
+
+  Output: 6 × (X, Y, Z, σ_Z)
+
+→ ~0.5ms total (6 × 80μs on GPU)
+→ Paper claim 의 per-keypoint uncertainty (E 의 bonus)</pre>
+
+<div class="step-roles">
+<div class="role-box role-claude">
+<h4>Claude</h4>
+<ul style="margin:0; padding-left: 16px;">
+<li>Sparse stereo .cu 파일 작성</li>
+<li>Python binding (pybind11)</li>
+<li>Synthetic test (known stereo pair, σ_Z 검증)</li>
+<li>tests/test_sparse_stereo.py</li>
+</ul>
+</div>
+<div class="role-box role-user">
+<h4>사용자</h4>
+<ul style="margin:0; padding-left: 16px;">
+<li>Jetson build test (CUDA compile)</li>
+<li>5/18 SVO replay 으로 Z accuracy 비교</li>
+</ul>
+</div>
+</div>
+
+<div class="latency-target">
+<strong>Success criterion</strong>: 6-keypoint 3D 계산 0.5ms ± 0.1ms, σ_Z error < 5mm at Z=1m
+</div>
+</div>
+
+<div class="step-card">
+<h3><span class="step-num">4</span> RawBuffer + sparse stereo integration <span class="badge badge-later">Later</span></h3>
+<div class="step-meta">3-5일 · Pipeline 통합 + 기존 dense path 와 비교</div>
+
+<p>Pipeline_main.py 또는 Track B 에 통합. Existing dense depth path 와 A/B 비교 mode.</p>
+
+<div class="latency-target">
+<strong>Success criterion</strong>: Track B 의 p99 16-17ms (E 단독 적용 시)
+</div>
+</div>
+
+<div class="step-card">
+<h3><span class="step-num">5</span> C++ inference wrapper start (B) <span class="badge badge-later">Later</span></h3>
+<div class="step-meta">1주 · CMake setup + ZED SDK C++ + TRT C++ load</div>
+
+<p><strong>구조</strong>:</p>
+<pre>cpp/
+  CMakeLists.txt
+  include/hwalker/
+    inference_loop.hpp
+    trt_engine.hpp
+    preprocess_cuda.hpp
+  src/
+    inference_loop.cpp
+    trt_engine.cpp
+    preprocess_cuda.cu
+    main.cpp           ← stand-alone executable
+
+Build:
+  cmake -B build -DCMAKE_BUILD_TYPE=Release
+  cmake --build build -j</pre>
+
+<p>Dependencies: ZED SDK 4.x, TensorRT 10.3+, CUDA 12.x</p>
+</div>
+
+<div class="step-card">
+<h3><span class="step-num">6</span> C++ inference loop (B + A + C) <span class="badge badge-later">Later</span></h3>
+<div class="step-meta">1-2주 · 전체 inference pipeline 의 C++ migration</div>
+
+<p>Loop:</p>
+<pre>while (running) {
+    // E: RawBuffer instead of dense depth
+    zed.grab(runtime);
+    zed.retrieveImage(left, sl::VIEW::LEFT_GRAY, sl::MEM::GPU);
+    zed.retrieveImage(right, sl::VIEW::RIGHT_GRAY, sl::MEM::GPU);
+
+    // C: CUDA preprocess kernel (no PyTorch)
+    preprocess_kernel<<<...>>>(left, trt_input);
+
+    // B: TRT C++ infer (no Python wrap)
+    context->enqueueV3(stream);
+    cudaStreamSynchronize(stream);
+
+    // E: Sparse stereo (CUDA)
+    sparse_stereo_kernel<<<...>>>(left, right, keypoints_2d, keypoints_3d, sigma_z);
+
+    // B: SHM write (C++)
+    shm_writer.write(keypoints_3d, sigma_z, ...);
+}</pre>
+
+<div class="latency-target">
+<strong>Success criterion</strong>: end-to-end p99 11-13ms
+</div>
+</div>
+
+<div class="step-card">
+<h3><span class="step-num">7</span> Memory pool + zero-copy refinement (A + D) <span class="badge badge-later">Later</span></h3>
+<div class="step-meta">3-5일 · pre-allocated buffer + cudaMallocAsync stream pool</div>
+
+<p>마지막 0.5-1ms gain. Step 6 의 fine-tuning.</p>
+
+<div class="latency-target">
+<strong>Success criterion</strong>: p99 9-11ms
+</div>
+</div>
+
+<div class="step-card">
+<h3><span class="step-num">8</span> Python ↔ C++ SHM bridge (B) <span class="badge badge-later">Later</span></h3>
+<div class="step-meta">3-5일 · Plan D Python 가 C++ inference loop 의 SHM 읽기</div>
+
+<p>Existing SHM v2 schema 유지. C++ writer ↔ Python reader.</p>
+
+<p>Existing <code>cpp/include/hwalker/shm_pose_v2_reader.hpp</code> 의 *writer* 버전 추가.</p>
+</div>
+
+<div class="step-card">
+<h3><span class="step-num">9</span> Benchmark + regression test <span class="badge badge-later">Later</span></h3>
+<div class="step-meta">2-3일 · 5/18 SVO replay 으로 final latency 측정</div>
+
+<p><strong>Tests</strong>:</p>
+<ul>
+<li>5/18 SVO 으로 새 pipeline 의 latency p50/p99/max</li>
+<li>Keypoint accuracy 비교 (dense vs sparse depth)</li>
+<li>Plan D EKF 의 input 일관성 (NPZ schema v2 유지)</li>
+<li>30 min continuous run, no drift / no failure</li>
+<li>215 unit test + 새 sparse stereo test 모두 pass</li>
+</ul>
+
+<div class="latency-target">
+<strong>Final target</strong>: end-to-end p99 9-11ms, p50 7-8ms, max < 15ms
+</div>
+</div>
+
+<h2>Paper Claim 강화</h2>
+
+<table>
+<thead><tr><th>Claim</th><th>현재</th><th>After Sprint 1</th></tr></thead>
+<tbody>
+<tr><td>End-to-end latency</td><td>"Sub-20ms"</td><td><strong>"Sub-15ms" (p99 9-11ms)</strong></td></tr>
+<tr><td>Depth uncertainty</td><td>(없음)</td><td><strong>"Per-keypoint σ_Z propagation" ⭐</strong></td></tr>
+<tr><td>SDK dependency</td><td>"ZED SDK PERFORMANCE depth"</td><td>"ZED SDK RawBuffer + custom sparse stereo"</td></tr>
+<tr><td>Pipeline arch</td><td>"Python TRT + C++ accel"</td><td><strong>"Full C++ inference loop" ⭐</strong></td></tr>
+</tbody>
+</table>
+
+<div class="summary-box">
+<h3>오늘 시작 (Step 1)</h3>
+<ol>
+<li><strong>New branch</strong>: <code>feature/sprint_1_camera_speed</code> from <code>feature/sprint_0_5_phase2_walking</code></li>
+<li><strong>Codebase audit</strong>: cpp/, scripts/, Track B 의 dependency map (Claude, ~2시간)</li>
+<li><strong>ZED SDK GPU memory API 조사</strong>: pyzed.sl docs + 기존 코드 사용 패턴 (Claude, ~1시간)</li>
+<li><strong>Audit HTML 작성</strong>: 결과 + Step 2 의 정확한 RawBuffer test plan</li>
+</ol>
+</div>
+
+<h2>Sprint 0.5 종료 / Sprint 1 진입 선언</h2>
+
+<pre># 현 branch 의 작업 마무리
+git checkout feature/sprint_0_5_phase2_walking
+git tag sprint_0_5_complete_20260518_camera_pivot
+
+# 새 branch
+git checkout -b feature/sprint_1_camera_speed
+git push -u origin feature/sprint_1_camera_speed
+
+# EKF wiki entry 는 그대로 (Sprint 2 에서 사용)
+# Plan v5 의 Month 1 timeline 은 변경 — 곧 update</pre>
+
+<h2>Risks + Mitigations</h2>
+
+<table>
+<thead><tr><th>Risk</th><th>Impact</th><th>Mitigation</th></tr></thead>
+<tbody>
+<tr><td>ZED SDK Raw L/R API 가 unstable</td><td>E path 차단</td><td>5/12 V4L2 abandon 처럼 다른 path 로 pivot (B 단독 적용)</td></tr>
+<tr><td>Sparse stereo σ_Z 가 dense depth 보다 nosier</td><td>Paper claim 약화</td><td>Synthetic test 로 σ_Z 정확도 측정, hybrid (dense for outliers, sparse for fast) 옵션</td></tr>
+<tr><td>C++ wrapper 의 ZED + TRT 통합 어려움</td><td>B 작업 지연</td><td>Step 5 에서 single-pass smoke test 먼저</td></tr>
+<tr><td>Paper deadline 압박 (Month 6 RA-L)</td><td>EKF iteration 시간 부족</td><td>Sprint 1 5-7주 + Sprint 2 EKF 2-3주 = 8-10주 < Month 6 의 6 month margin</td></tr>
+<tr><td>5/18 SVO 와 새 pipeline 의 NPZ schema 호환성</td><td>Regression test 어려움</td><td>NPZ schema v2 유지 (이미 wired), benchmark SVO 영구 보존</td></tr>
+</tbody>
+</table>
+
+<footer>
+<p>
+Sprint 1 Camera Speed Push · 2026-05-18 · 9-step roadmap · Daily 3 시간 × 5-7주<br>
+Source: <code>~/realtime-vision-control/docs/review/sprint_1_camera_speed_push.html</code><br>
+Branch: <code>feature/sprint_1_camera_speed</code> (created in Step 1)
+</p>
+</footer>
+
+</div>
+</body>
+</html>
