@@ -37,16 +37,34 @@ class TRTPoseEngine:
         4: "left_ankle",  5: "right_ankle",
     }
 
-    def __init__(self, engine_path, imgsz=640, conf=0.25, iou=0.7, num_kpts=6):
+    def __init__(self, engine_path, imgsz=640, conf=0.25, iou=0.7, num_kpts=6,
+                 use_cpp_trt=False):
+        """TRT pose inference engine.
+
+        Args:
+            use_cpp_trt: if True, use hwalker_trt_runner C++ extension instead
+                of Python TRT context.execute_async_v3(). Drop-in replacement;
+                preprocess + postprocess paths identical. Expected ~2-3 ms gain
+                from removing Python TRT API wrap overhead (Sprint 1 Phase 2 Week 2).
+                Caller should build cpp/ first (scripts/build_cpp.sh).
+        """
         self.engine_path = engine_path
         self.imgsz = imgsz
         self.conf_thresh = conf
         self.iou_thresh = iou
         self.num_kpts = num_kpts
         self.is_loaded = False
+        self.use_cpp_trt = bool(use_cpp_trt)
 
+        # Python TRT state (only populated when use_cpp_trt=False)
         self._context = None
         self._engine = None
+        # C++ TRT state (only populated when use_cpp_trt=True)
+        self._cpp_runner = None
+        self._input_name = None
+        self._output_name = None
+
+        # Shared GPU I/O buffers (both paths use these)
         self._stream = None
         self._input_tensor = None
         self._output_tensor = None
@@ -129,7 +147,6 @@ class TRTPoseEngine:
             with open(self.engine_path, 'rb') as f:
                 self._engine = trt.Runtime(logger).deserialize_cuda_engine(f.read())
 
-        self._context = self._engine.create_execution_context()
         self._input_name = self._engine.get_tensor_name(0)
         self._output_name = self._engine.get_tensor_name(1)
         input_shape = list(self._engine.get_tensor_shape(self._input_name))
@@ -139,23 +156,51 @@ class TRTPoseEngine:
 
         self._stream = torch.cuda.Stream()
 
-        # GPU 버퍼 사전 할당
+        # GPU 버퍼 사전 할당 (shared between Python + C++ paths)
         self._input_tensor = torch.zeros(input_shape, dtype=torch.float32, device='cuda')
         self._output_tensor = torch.empty(output_shape, dtype=torch.float32, device='cuda')
         self._pad_tensor = torch.full(
             (1, 3, self.imgsz, self.imgsz), 114.0 / 255.0,
             dtype=torch.float32, device='cuda'
         )
-        self._context.set_tensor_address(self._input_name, self._input_tensor.data_ptr())
-        self._context.set_tensor_address(self._output_name, self._output_tensor.data_ptr())
 
-        # 워밍업
+        if self.use_cpp_trt:
+            # C++ TRT runner (Sprint 1 Phase 2 Week 2)
+            # Free the Python execution context (we don't need it; C++ owns inference).
+            # The deserialized engine in self._engine stays alive for shape/dtype info,
+            # but actual inference is via the C++ runner that loads the same engine file.
+            self._context = None
+            try:
+                import hwalker_trt_runner  # type: ignore
+            except ImportError:
+                try:
+                    from perception.realtime import hwalker_trt_runner  # type: ignore
+                except ImportError as e:
+                    raise RuntimeError(
+                        "use_cpp_trt=True but hwalker_trt_runner not found. "
+                        "Build first: scripts/build_cpp.sh"
+                    ) from e
+            self._cpp_runner = hwalker_trt_runner.TrtRunner(self.engine_path)
+            print(f"  [TRT] using C++ TrtRunner (hwalker_trt_runner)")
+        else:
+            # Python TRT path (original)
+            self._context = self._engine.create_execution_context()
+            self._context.set_tensor_address(
+                self._input_name, self._input_tensor.data_ptr()
+            )
+            self._context.set_tensor_address(
+                self._output_name, self._output_tensor.data_ptr()
+            )
+            print(f"  [TRT] using Python TRT context")
+
+        # 워밍업 (both paths)
         dummy = np.zeros((600, 960, 3), dtype=np.uint8)
         for _ in range(3):
             self.predict(dummy)
 
         self.is_loaded = True
-        print(f"  [TRT] Ready (torch GPU preprocess, GPU output parsing)")
+        print(f"  [TRT] Ready (torch GPU preprocess, GPU output parsing"
+              f"{', C++ infer' if self.use_cpp_trt else ''})")
 
     # ── 전처리 (torch GPU) ───────────────────────────────────────────────────
 
@@ -225,9 +270,21 @@ class TRTPoseEngine:
             t1 = time.perf_counter()
             _profile['preprocess_ms'] = (t1 - t0) * 1000.0
 
-        # TRT 실행 (사전 바인딩 버퍼)
+        # TRT 실행 — Python TRT context 또는 C++ TrtRunner (use_cpp_trt 분기)
         with torch.cuda.stream(self._stream):
-            self._context.execute_async_v3(self._stream.cuda_stream)
+            if self._cpp_runner is not None:
+                # C++ path: pass pre-allocated tensor data_ptr + stream handle
+                # Returns False on TRT internal failure; raise to surface upstream.
+                ok = self._cpp_runner.infer(
+                    self._input_tensor.data_ptr(),
+                    self._output_tensor.data_ptr(),
+                    self._stream.cuda_stream,
+                )
+                if not ok:
+                    raise RuntimeError("hwalker_trt_runner.infer() returned False")
+            else:
+                # Python path: pre-bound buffers via set_tensor_address (in load())
+                self._context.execute_async_v3(self._stream.cuda_stream)
             self._stream.synchronize()
 
         if _profile is not None:

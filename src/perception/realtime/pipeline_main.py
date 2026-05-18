@@ -315,8 +315,11 @@ class Pipeline:
 
         if _HAS_DIRECT_TRT and not self.args.no_trt:
             engine_path = os.path.join(_model_dir, f'yolo26s-lower6-v2-{imgsz}.engine')
-            print(f"[Pipeline] DirectTRT 모드 (imgsz={imgsz})")
-            self.model = TRTPoseEngine(engine_path, imgsz=imgsz)
+            use_cpp_trt = getattr(self.args, 'use_cpp_trt', False)
+            print(f"[Pipeline] DirectTRT 모드 (imgsz={imgsz}"
+                  f"{', C++ runner' if use_cpp_trt else ''})")
+            self.model = TRTPoseEngine(engine_path, imgsz=imgsz,
+                                       use_cpp_trt=use_cpp_trt)
             self.model.load()
             self._use_direct_trt = True
         else:
@@ -1473,6 +1476,15 @@ def parse_args() -> argparse.Namespace:
              "  DepthHoldLayer between _batch_2d_to_3d and bone_bc.apply so\n"
              "  brief ZED PERFORMANCE NaN flickers do not invalidate the entire\n"
              "  frame. Held points carry inflated σ when fed to Plan D EKF.",
+    )
+    # ── Sprint 1 Phase 2 Week 2: C++ TRT runner ────────────────────────
+    parser.add_argument(
+        "--use-cpp-trt", dest="use_cpp_trt", action="store_true",
+        help="Use hwalker_trt_runner C++ extension for TRT inference call.\n"
+             "  Drop-in replacement for Python TRT context.execute_async_v3().\n"
+             "  Preprocess + postprocess paths unchanged.\n"
+             "  Build first: scripts/build_cpp.sh (Jetson, TensorRT 10.3 detect).\n"
+             "  Expected gain: ~2 ms (Python TRT API wrap removed).",
     )
     # ── Sprint 1 Phase 1 A.1: Plan D async separation ──────────────────
     parser.add_argument(
