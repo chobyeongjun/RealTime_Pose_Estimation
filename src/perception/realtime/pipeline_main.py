@@ -373,8 +373,12 @@ class Pipeline:
                 print(f"[Pipeline][WARN] SHM v2 init failed: {exc}", flush=True)
                 self.pub_v2 = None
         # Forecast publisher (Plan D EKF forecast publish)
+        # In async mode the feeder owns the forecast publisher (separate process),
+        # so we leave self.pub_forecast = None here.
+        _is_async = getattr(self.args, 'plan_d_mode', 'inline') == 'async'
         if (self._predictor is not None and ForecastPublisher is not None
-                and getattr(self.args, 'enable_shm_v2', False)):
+                and getattr(self.args, 'enable_shm_v2', False)
+                and not _is_async):
             try:
                 self.pub_forecast = ForecastPublisher(
                     name='hwalker_forecast', create=True,
@@ -385,6 +389,36 @@ class Pipeline:
                 print(f"[Pipeline][WARN] Forecast publisher init failed: {exc}",
                       flush=True)
                 self.pub_forecast = None
+
+        # ── Sprint 1 Phase 1 A.1: Plan D async feeder process ─────────────
+        self._plan_d_async_queue = None
+        self._plan_d_async_proc = None
+        self._plan_d_async_stop = None
+        if _is_async and self._predictor is not None:
+            try:
+                from perception.realtime.plan_d_feeder import start_feeder_process
+                self._plan_d_async_proc, self._plan_d_async_queue, self._plan_d_async_stop = \
+                    start_feeder_process(
+                        forecast_shm_name='hwalker_forecast',
+                        n_joints=6,
+                        fs_hz=60.0,
+                        tau_s=self._forecast_tau_s,
+                        queue_size=200,
+                        log_path='/tmp/plan_d_feeder.log',
+                    )
+                print(f"[Pipeline] Plan D async feeder spawned "
+                      f"(pid={self._plan_d_async_proc.pid}, "
+                      f"queue_size=200, log=/tmp/plan_d_feeder.log)")
+                # In async mode, parent process should NOT also run predictor
+                # locally — feeder owns it. Disable local predictor reference.
+                self._predictor_inline = self._predictor
+                # NB: keep self._predictor non-None so feed counters work,
+                # but call sites must check _plan_d_async_queue first (already done).
+            except Exception as exc:
+                print(f"[Pipeline][WARN] Plan D async feeder spawn failed: {exc} — falling back to inline",
+                      flush=True)
+                self._plan_d_async_queue = None
+                self._plan_d_async_proc = None
         # RT trace CSV open (--trace-csv 옵션 시)
         if getattr(self.args, 'trace_csv', None):
             import csv
@@ -744,56 +778,82 @@ class Pipeline:
                         hip_vert = float('nan')
 
                 t_now_s = time.monotonic_ns() / 1e9
-                try:
-                    self._predictor.feed(
-                        t_now=t_now_s,
-                        q=q_rad,
-                        sigma_per_joint=sigma_per_joint,
-                        hip_z_world_m=hip_vert,
-                    )
-                    self._feed_success += 1
-                except Exception as _feed_exc:
-                    self._feed_skip[f'feed_exc:{type(_feed_exc).__name__}'] += 1
-                    if self._frame_id < 5:
-                        print(f"[Pipeline][WARN] Plan D feed exception: "
-                              f"{_feed_exc}", flush=True)
 
-                # Forecast publish (Plan D EKF τ-ahead → /hwalker_forecast).
-                # Guarded separately so a publish bug never masks the feed.
-                if self.pub_forecast is not None:
+                # ── Sprint 1 Phase 1 A.1: Plan D async separation ──────────
+                # async mode: enqueue to feeder process (Plan D feed + forecast
+                # publish moved out of inference hot loop, ~1.4ms gain).
+                if getattr(self, '_plan_d_async_queue', None) is not None:
                     try:
-                        fc = self._predictor.forecast(self._forecast_tau_s)
-                        hs_L = self._predictor.predict_heel_strike(
-                            "L", max_t_ahead_s=2.0, min_omega_rad_s=1.0,
-                        )
-                        hs_R = self._predictor.predict_heel_strike(
-                            "R", max_t_ahead_s=2.0, min_omega_rad_s=1.0,
-                        )
-                        self.pub_forecast.publish(
+                        from plan_d_feeder import FeedMessage  # type: ignore
+                    except ImportError:
+                        from perception.realtime.plan_d_feeder import FeedMessage
+                    try:
+                        self._plan_d_async_queue.put_nowait(FeedMessage(
+                            t_now=t_now_s,
+                            q=q_rad,
+                            sigma_per_joint=sigma_per_joint,
+                            hip_z_world_m=hip_vert,
                             frame_id=self._frame_id,
-                            publish_done_mono_ns=time.monotonic_ns(),
-                            tau_lookahead_s=self._forecast_tau_s,
-                            forecast=fc,
-                            cascade_level=int(self._predictor.level),
-                            stride_count=int(self._predictor.stride_count),
-                            template_touched_fraction=float(
-                                self._predictor.template_touched_fraction
-                            ),
-                            is_ready_for_control=bool(
-                                self._predictor.is_ready_for_control(
-                                    require_l3=False,
-                                    max_sigma_phi=2.0,
-                                    max_ambiguity=0.9,
-                                )
-                            ),
-                            hs_event_L=hs_L,
-                            hs_event_R=hs_R,
-                            q_pred_sigma=None,
-                        )
-                    except Exception as _exc_fc:
+                            rgb_ts_ns=int(t_now_s * 1e9),
+                        ))
+                        self._feed_success += 1
+                    except Exception as _exc_async:
+                        self._feed_skip[f'async_full:{type(_exc_async).__name__}'] += 1
                         if self._frame_id < 5:
-                            print(f"[Pipeline][WARN] Forecast publish failed: "
-                                  f"{_exc_fc}", flush=True)
+                            print(f"[Pipeline][WARN] Plan D async enqueue failed: "
+                                  f"{_exc_async}", flush=True)
+                else:
+                    # inline mode: existing behavior
+                    try:
+                        self._predictor.feed(
+                            t_now=t_now_s,
+                            q=q_rad,
+                            sigma_per_joint=sigma_per_joint,
+                            hip_z_world_m=hip_vert,
+                        )
+                        self._feed_success += 1
+                    except Exception as _feed_exc:
+                        self._feed_skip[f'feed_exc:{type(_feed_exc).__name__}'] += 1
+                        if self._frame_id < 5:
+                            print(f"[Pipeline][WARN] Plan D feed exception: "
+                                  f"{_feed_exc}", flush=True)
+
+                    # Forecast publish (Plan D EKF τ-ahead → /hwalker_forecast).
+                    # Guarded separately so a publish bug never masks the feed.
+                    if self.pub_forecast is not None:
+                        try:
+                            fc = self._predictor.forecast(self._forecast_tau_s)
+                            hs_L = self._predictor.predict_heel_strike(
+                                "L", max_t_ahead_s=2.0, min_omega_rad_s=1.0,
+                            )
+                            hs_R = self._predictor.predict_heel_strike(
+                                "R", max_t_ahead_s=2.0, min_omega_rad_s=1.0,
+                            )
+                            self.pub_forecast.publish(
+                                frame_id=self._frame_id,
+                                publish_done_mono_ns=time.monotonic_ns(),
+                                tau_lookahead_s=self._forecast_tau_s,
+                                forecast=fc,
+                                cascade_level=int(self._predictor.level),
+                                stride_count=int(self._predictor.stride_count),
+                                template_touched_fraction=float(
+                                    self._predictor.template_touched_fraction
+                                ),
+                                is_ready_for_control=bool(
+                                    self._predictor.is_ready_for_control(
+                                        require_l3=False,
+                                        max_sigma_phi=2.0,
+                                        max_ambiguity=0.9,
+                                    )
+                                ),
+                                hs_event_L=hs_L,
+                                hs_event_R=hs_R,
+                                q_pred_sigma=None,
+                            )
+                        except Exception as _exc_fc:
+                            if self._frame_id < 5:
+                                print(f"[Pipeline][WARN] Forecast publish failed: "
+                                      f"{_exc_fc}", flush=True)
 
         # 200-frame Plan D + feed counters log (always runs while predictor exists)
         if self._predictor is not None:
@@ -1224,6 +1284,20 @@ class Pipeline:
                 print(f"[Pipeline][WARN] Forecast publisher close failed: {exc}",
                       file=sys.stderr)
 
+        # Plan D async feeder shutdown (Sprint 1 Phase 1)
+        if getattr(self, '_plan_d_async_proc', None) is not None:
+            try:
+                from perception.realtime.plan_d_feeder import stop_feeder
+                stop_feeder(
+                    self._plan_d_async_proc,
+                    self._plan_d_async_queue,
+                    self._plan_d_async_stop,
+                )
+                print("[Pipeline] Plan D async feeder 종료 완료")
+            except Exception as exc:
+                print(f"[Pipeline][WARN] Plan D async feeder stop failed: {exc}",
+                      file=sys.stderr)
+
         # RT trace CSV close (--trace-csv 활성화 시)
         if self._trace_fp is not None:
             try:
@@ -1360,6 +1434,18 @@ def parse_args() -> argparse.Namespace:
              "  DepthHoldLayer between _batch_2d_to_3d and bone_bc.apply so\n"
              "  brief ZED PERFORMANCE NaN flickers do not invalidate the entire\n"
              "  frame. Held points carry inflated σ when fed to Plan D EKF.",
+    )
+    # ── Sprint 1 Phase 1 A.1: Plan D async separation ──────────────────
+    parser.add_argument(
+        "--plan-d-mode", dest="plan_d_mode",
+        choices=["inline", "async"], default="inline",
+        help="Plan D feed + forecast publish location.\n"
+             "  inline (default): predictor.feed + forecast publish in this loop\n"
+             "                    (T3→T4 stage cost ~1.4 ms regression).\n"
+             "  async: spawn plan_d_feeder process. Inference loop only\n"
+             "         enqueues (t, q, σ, hip_z) via mp.Queue.\n"
+             "         Forecast 의 logical latency: +1 frame (~8.3ms @ 120fps),\n"
+             "         absorbed by 50ms forecast horizon. e2e gain: ~1.0-1.5 ms.",
     )
     return parser.parse_args()
 

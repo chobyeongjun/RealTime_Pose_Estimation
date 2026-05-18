@@ -120,11 +120,12 @@ def main() -> int:
         print(f"ERROR: not a directory: {session_dir}", file=sys.stderr)
         return 1
 
-    # Auto-detect conditions from subdirectories (supports both
-    # track_comparison_* 4-condition layout and track_a_diag_* 2-condition layout)
+    # Auto-detect conditions from subdirectories (supports track_comparison_*,
+    # track_a_diag_*, plan_d_async_* layouts)
     cond_candidates = ['A1_minimal', 'A2_full',
                        'A1_track_a_minimal', 'A2_track_a_full',
-                       'B1_track_b_minimal', 'B2_track_b_full']
+                       'B1_track_b_minimal', 'B2_track_b_full',
+                       'inline', 'async']
     conditions = [c for c in cond_candidates if (session_dir / c).is_dir()]
     if not conditions:
         print(f"ERROR: no recognized condition subdirs in {session_dir}", file=sys.stderr)
