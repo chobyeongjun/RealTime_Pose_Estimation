@@ -120,8 +120,15 @@ def main() -> int:
         print(f"ERROR: not a directory: {session_dir}", file=sys.stderr)
         return 1
 
-    conditions = ['A1_track_a_minimal', 'A2_track_a_full',
-                  'B1_track_b_minimal', 'B2_track_b_full']
+    # Auto-detect conditions from subdirectories (supports both
+    # track_comparison_* 4-condition layout and track_a_diag_* 2-condition layout)
+    cond_candidates = ['A1_minimal', 'A2_full',
+                       'A1_track_a_minimal', 'A2_track_a_full',
+                       'B1_track_b_minimal', 'B2_track_b_full']
+    conditions = [c for c in cond_candidates if (session_dir / c).is_dir()]
+    if not conditions:
+        print(f"ERROR: no recognized condition subdirs in {session_dir}", file=sys.stderr)
+        return 1
 
     results = {}
     for cond in conditions:
@@ -168,8 +175,8 @@ def main() -> int:
     print()
 
     # ─── Comparison: A1 vs A2 (Plan D cost in Track A) ───────────────────
-    a1 = results.get('A1_track_a_minimal')
-    a2 = results.get('A2_track_a_full')
+    a1 = results.get('A1_minimal') or results.get('A1_track_a_minimal')
+    a2 = results.get('A2_full') or results.get('A2_track_a_full')
     if a1 and a2 and a1.get('present') and a2.get('present'):
         print("=" * 100)
         print("Comparison: Plan D + SHM v2 의 cost (Track A)")
