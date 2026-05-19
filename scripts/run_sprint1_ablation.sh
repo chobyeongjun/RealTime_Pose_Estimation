@@ -36,6 +36,21 @@ fi
 
 mkdir -p "$OUTDIR"
 
+# Pre-authenticate sudo ONCE (for SHM cleanup between runs).
+# Without this, each iteration prompts and blocks.
+echo ""
+echo "Sudo auth needed for /dev/shm cleanup between runs (one-time)."
+if ! sudo -v; then
+    echo "WARNING: sudo unavailable. SHM cleanup will use plain rm only."
+    SUDO=""
+else
+    SUDO="sudo"
+    # Background keep-alive — refresh sudo timestamp every 60s
+    ( while true; do sleep 60; sudo -n true 2>/dev/null || exit; done ) &
+    SUDO_KEEPALIVE_PID=$!
+    trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null || true' EXIT
+fi
+
 # 4 combinations
 LABELS=(01_baseline 02_async 03_cuda 04_both)
 ARGS=(

@@ -256,14 +256,30 @@ class TRTPoseEngine:
 
         # ── CUDA kernel fast path (Sprint 1 Phase 2 Week 3) ────────────────
         if self._cuda_preprocessor is not None:
+            # Stream choice (debug knob — defaults to TRT stream, current behavior):
+            #   HWALKER_PREPROC_STREAM=trt     (default) — kernel + TRT on same stream
+            #   HWALKER_PREPROC_STREAM=null    — legacy NULL stream (auto-syncs all)
+            #   HWALKER_PREPROC_STREAM=default — torch's current stream (per-thread default)
+            mode = os.environ.get("HWALKER_PREPROC_STREAM", "trt").lower()
+            if mode == "null":
+                stream_h = 0   # legacy default stream: implicit sync with all
+            elif mode == "default":
+                stream_h = torch.cuda.current_stream().cuda_stream
+            else:
+                stream_h = self._stream.cuda_stream
             ok = self._cuda_preprocessor.process(
                 image,
                 self._input_tensor.data_ptr(),
                 bool(is_bgra),
-                self._stream.cuda_stream,
+                stream_h,
             )
             if not ok:
                 raise RuntimeError("hwalker_cuda_preprocess.process() returned False")
+            # If preprocess ran on a different stream than self._stream, ensure
+            # TRT (which runs on self._stream) waits for preprocess to finish.
+            # NULL stream syncs automatically. Per-thread default does NOT.
+            if mode == "default":
+                self._stream.wait_stream(torch.cuda.current_stream())
             return scale, pad_w, pad_h
 
         # ── torch reference path (original) ────────────────────────────────
