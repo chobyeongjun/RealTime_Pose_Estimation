@@ -1434,10 +1434,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--serialize-depth", dest="serialize_depth", action="store_true",
         default=False,
-        help="depth retrieve를 predict 뒤로 미룸 (실험 기능, 기본 OFF).\n"
-             "  ON:  GPU 순차 실행 → spike 제거되지만 grab 파이프라인 붕괴로 39Hz.\n"
-             "  OFF: 기존 parallel 모드 (73Hz, 간헐 spike 있음, 대부분 background 프로세스 원인).\n"
-             "  → 근본 해결은 CUDA_Stream 폴더의 stream 분리 실험 (별도 트랙).",
+        help="depth retrieve 를 predict 뒤로 미룸 (대안 모드, 기본 OFF).\n"
+             "  ON  (serialize): main 의 depth_request 후 capture 가 retrieve.\n"
+             "                   GPU 순차 → spike 제거 + 평균 +1-2 ms.\n"
+             "  OFF (parallel-safe, 권장): capture 가 main 의 depth consumption\n"
+             "                   을 기다린 후 다음 retrieve. RGB-depth atomic\n"
+             "                   보장 + parallel 성능 유지 (race 없음).\n"
+             "                   ※ 2026-05-19 race fix 적용 후 default 안전.",
     )
     parser.add_argument(
         "--bone-std", dest="bone_std", type=float, default=0.010,

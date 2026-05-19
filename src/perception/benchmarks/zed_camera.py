@@ -1018,6 +1018,13 @@ class PipelinedCamera:
         # main이 predict 끝내고 depth 요청 → capture가 retrieve_depth 시작
         self.depth_request = threading.Event()
 
+        # parallel-safe (default) 모드 전용:
+        # main 이 get_depth_and_gravity 로 현재 frame depth 읽고 set →
+        # capture 가 다음 frame depth retrieve 진행. RGB-depth atomic 보장.
+        # 초기 set: 첫 iter 의 capture 가 depth retrieve 즉시 진행 가능.
+        self.depth_consumed = threading.Event()
+        self.depth_consumed.set()
+
         # 하위 호환
         self.ready = threading.Event()
 
@@ -1075,11 +1082,21 @@ class PipelinedCamera:
 
             # ── Phase 2: depth retrieve
             #   serialize_depth=True: main이 predict 끝내고 depth_request.set 할 때까지 대기
-            #   False: 즉시 retrieve (기존 동작, predict와 병렬)
+            #   False (parallel-safe): main 이 이전 frame depth 를 consume 할 때까지 대기.
+            #     이 대기 가 없으면 frame K+1 의 depth 가 main 의 frame K depth 읽기 보다
+            #     먼저 self._depth 를 덮어쓰는 race 발생 (RGB-depth misalignment).
+            #     첫 iter 는 depth_consumed 가 init 시 set 되어 있어 즉시 진행.
             if self.serialize_depth:
                 self.depth_request.wait(timeout=0.1)
                 if not self._running:
                     break
+            else:
+                # parallel-safe: wait for main consumption of previous depth
+                while self._running and not self.depth_consumed.wait(timeout=0.1):
+                    pass
+                if not self._running:
+                    break
+                self.depth_consumed.clear()
 
             if hasattr(self.camera, 'get_depth'):
                 try:
@@ -1103,17 +1120,24 @@ class PipelinedCamera:
         return self.frame
 
     def get_depth_and_gravity(self, timeout=1.0):
-        """predict 끝난 뒤 호출 — depth retrieve 트리거 + 완료 대기.
+        """predict 끝난 뒤 호출 — 현재 frame 의 depth + gravity 반환.
 
         serialize_depth=True: 여기서 depth_request.set() → capture가 retrieve 시작.
                               retrieve 3ms 소요 후 ready_depth.set() 기다림.
-        serialize_depth=False: retrieve는 이미 완료 상태, ready_depth 즉시 반환.
+        serialize_depth=False (parallel-safe): 현재 frame 의 retrieve 는 이미 완료 됨.
+                              return 후 depth_consumed.set() 으로 capture 에 다음
+                              frame 의 retrieve 허용 신호. RGB-depth atomic 보장.
         """
         if self.serialize_depth:
             self.depth_request.set()  # capture에게 "이제 retrieve 해도 됨" 신호
         self.ready_depth.wait(timeout=timeout)
         self.ready_depth.clear()
-        return self._depth, self._gravity
+        # Snapshot CURRENT frame's depth+gravity BEFORE signaling capture, so any
+        # subsequent overwrite by capture's next-iter retrieve doesn't affect us.
+        depth, gravity = self._depth, self._gravity
+        if not self.serialize_depth:
+            self.depth_consumed.set()  # capture 에 다음 frame retrieve 허용
+        return depth, gravity
 
     def get(self):
         """하위 호환: RGB + depth + IMU 한번에 (두 ready 모두 대기)."""
@@ -1142,7 +1166,10 @@ class PipelinedCamera:
 
     def close(self):
         self._running = False
-        self.consumed.set()  # 스레드 깨우기
+        # Wake the capture thread from any wait point so it can exit cleanly.
+        self.consumed.set()        # consumed.wait
+        self.depth_consumed.set()  # depth_consumed.wait (parallel-safe mode)
+        self.depth_request.set()   # depth_request.wait (serialize mode)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         self.camera.close()
